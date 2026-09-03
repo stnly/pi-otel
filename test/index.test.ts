@@ -1,6 +1,31 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeLogPayload } from "../src/index.ts";
+import { extractSessionId, normalizeLogPayload } from "../src/index.ts";
+
+describe("extractSessionId", () => {
+  test("strips the timestamp prefix from an interactive session file stem", () => {
+    const uuid = "019123ab-c1d0-7ef4-9a4b-1c2d3e4f5a6b";
+    assert.equal(extractSessionId(`1728000000000_${uuid}`), uuid);
+  });
+
+  test("returns a bare UUID stem unchanged", () => {
+    const uuid = "019123ab-c1d0-7ef4-9a4b-1c2d3e4f5a6b";
+    assert.equal(extractSessionId(uuid), uuid);
+  });
+
+  test("returns a non-UUID stem unchanged (backward-compatible value)", () => {
+    assert.equal(extractSessionId("e2e"), "e2e");
+    assert.equal(extractSessionId("my-named-session"), "my-named-session");
+  });
+
+  test("does not match a UUID that is not terminal in the stem", () => {
+    assert.equal(
+      extractSessionId("019123ab-c1d0-7ef4-9a4b-1c2d3e4f5a6b_extra"),
+      "019123ab-c1d0-7ef4-9a4b-1c2d3e4f5a6b_extra",
+    );
+    assert.equal(extractSessionId("not-a-uuid-at-all"), "not-a-uuid-at-all");
+  });
+});
 
 /**
  * The pi-otel:log channel accepts payloads from other extensions, which are

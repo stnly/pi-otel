@@ -8,6 +8,7 @@ All notable changes to this project are documented in this file. The format foll
 
 - The default GenAI dialect is now `1.43`, the attribute set of semantic-conventions v1.43.0 (the last registry sync of the GenAI conventions before they federated to the semantic-conventions-genai repository). On the LLM span, cache and reasoning usage moves to the registry names `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`, and `gen_ai.usage.reasoning.output_tokens`; `gen_ai.client.token.usage` records only the registry's `input`/`output` token types (cache and reasoning counts live in the span attributes); `gen_ai.request.stream` and `gen_ai.response.time_to_first_chunk` are recorded; and time-to-first-token ships as the registry metric `gen_ai.client.operation.time_to_first_chunk` instead of `pi.llm.time_to_first_token`. `gen_ai.usage.cache_write_1h_input_tokens` and `gen_ai.usage.cost_usd` stay as documented extension-specific attributes (no registry release defines either). Pin `PI_OTEL_SEMCONV=1.37` (or `1.36`) to keep the previous names; each dialect still emits exactly its own set.
 - Node 20 support dropped: `engines.node` is now `>=22`, and CI runs on 22 and 24. Node 20 reached end of life in April 2026.
+- `pi.session.id` and `pi.session.parent_id` now carry pi's canonical session UUID (from `SessionManager.getSessionId()`, falling back to the UUID extracted from the session filename) instead of the `<timestamp>_<uuid>` filename stem. Dashboards keyed on the old stem format need the UUID; a filename without a trailing UUID keeps its previous whole-stem value. Subagent-spawned children previously reported the literal id `session` from their `run-N/session.jsonl` paths; they now report their real id.
 - OpenTelemetry dependencies moved to `@opentelemetry/sdk-*` 2.11.0 / experimental 0.222.0 / `api` 1.9.1 / `semantic-conventions` 1.43.0.
 
 ### Fixed
@@ -27,6 +28,7 @@ All notable changes to this project are documented in this file. The format foll
 ### Added
 
 - `pi.compaction.will_retry` on the compaction log record and metric attributes: overflow-recovery compactions (which retry the aborted turn) are now distinguishable from manual and threshold ones.
+- `PI_OTEL_PARENT_SESSION_ID` (and the `PI_SUBAGENT_PARENT_SESSION` convention) links a subagent child session to its orchestrating session as `pi.session.parent_id` when the child starts with no `previousSessionFile`.
 - `pi.interaction.origin` (`user` | `agent`) on every interaction span.
 - A metrics test layer covering dialect-dependent instrument naming, and tracker tests for `ensureInteraction` and the 1.43 attribute set. End-to-end replays now follow pi's real event order for overflow recovery (compaction between `agent_end` and the retry's `agent_start`) and cover an extension-triggered turn on an idle session, and `effectiveExporterTokens` is unit-tested for every run mode.
 

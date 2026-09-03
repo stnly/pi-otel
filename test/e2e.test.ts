@@ -33,6 +33,7 @@ const E2E_ENV_KEYS = [
   "OTEL_METRIC_EXPORT_INTERVAL",
   "PI_OTEL_DISABLED",
   "PI_OTEL_SEMCONV",
+  "PI_OTEL_PARENT_SESSION_ID",
 ] as const;
 
 before(async () => {
@@ -155,7 +156,7 @@ function traceBlob(): string {
 
 // --- fake ExtensionAPI ------------------------------------------------------
 
-function fakePi() {
+function fakePi(sessionManager: Record<string, unknown> = {}) {
   const handlers = new Map<string, (e: any, ctx: any) => any>();
   const commands = new Map<string, { handler: (a: string, c: any) => any }>();
   const eventListeners = new Map<string, Array<(d: unknown) => void>>();
@@ -164,7 +165,7 @@ function fakePi() {
     hasUI: false,
     model: { id: "test-model", provider: "test" },
     signal: undefined as AbortSignal | undefined,
-    sessionManager: { getSessionFile: () => "/tmp/e2e.jsonl" },
+    sessionManager: { getSessionFile: () => "/tmp/e2e.jsonl", ...sessionManager },
     ui: { notify: () => {}, setStatus: () => {} },
   };
   const pi = {
@@ -638,5 +639,86 @@ describe("end-to-end over real HTTP OTLP (JSON protocol)", () => {
     const metricNames = allMetricNames();
     assert.ok(metricNames.includes("pi.turn.count"), "turn counted");
     assert.ok(!metricNames.includes("pi.prompt.count"), "agent-origin run is not counted as a user prompt");
+  });
+
+  test("session ids resolve to the canonical UUID, and parent ids match", async () => {
+    // SessionManager.getSessionId() is pi's canonical session identity; the
+    // filename stem carries a timestamp prefix, and subagent children would
+    // derive the literal "session" from their run-N/session.jsonl path.
+    const uuid = "019123ab-c1d0-7ef4-9a4b-1c2d3e4f5a6b";
+    const parentUuid = "019123ab-c1d0-7ef4-9a4b-aaaaaaaaaaaa";
+    resetReceived();
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = ENDPOINT;
+    const { pi, handlers, ctx } = fakePi({
+      getSessionId: () => uuid,
+      getSessionFile: () => `/tmp/${Date.now()}_${uuid}.jsonl`,
+    });
+    const mod = await import("../src/index.ts");
+    mod.default(pi);
+    const emit = async (event: string, payload: any) => {
+      const h = handlers.get(event);
+      if (h) await h({ type: event, ...payload }, ctx);
+    };
+
+    await emit("session_start", {
+      reason: "resume",
+      previousSessionFile: `/tmp/1728000000000_${parentUuid}.jsonl`,
+    });
+    await emit("before_agent_start", { prompt: "id check", systemPrompt: "" });
+    await emit("agent_start", {});
+    await emit("turn_start", { turnIndex: 0, timestamp: Date.now() });
+    await emit("before_provider_request", { payload: {} });
+    await emit("after_provider_response", { status: 200, headers: {} });
+    await emit("turn_end", {
+      turnIndex: 0,
+      message: { role: "assistant", content: [{ type: "text", text: "ok" }], model: "test-model", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, stopReason: "stop" },
+      toolResults: [],
+    });
+    await emit("agent_end", { messages: [] });
+    await emit("agent_settled", {});
+    await emit("session_shutdown", { reason: "quit" });
+
+    const spans = allSpans();
+    const session = spans.find((s) => s.name === "pi.session")!;
+    assert.ok(session, "session span");
+    const sa = attrsToRecord(session.attributes);
+    assert.equal(sa["pi.session.id"], uuid, "canonical UUID, not the filename stem");
+    assert.equal(sa["pi.session.parent_id"], parentUuid, "parent id normalized to the bare UUID");
+    const llm = spans.find((s) => s.name === "pi.llm_request")!;
+    assert.equal(attrsToRecord(llm.attributes)["pi.session.id"], uuid, "session id consistent across spans");
+  });
+
+  test("subagent children link to their parent via the env fallback", async () => {
+    // A subagent-spawned child starts with reason=startup and no
+    // previousSessionFile; the orchestrator publishes the parent session id
+    // through PI_OTEL_PARENT_SESSION_ID (or PI_SUBAGENT_PARENT_SESSION).
+    const childUuid = "019123ab-c1d0-7ef4-9a4b-bbbbbbbbbbbb";
+    const parentUuid = "019123ab-c1d0-7ef4-9a4b-aaaaaaaaaaaa";
+    resetReceived();
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = ENDPOINT;
+    process.env.PI_OTEL_PARENT_SESSION_ID = parentUuid;
+    try {
+      const { pi, handlers, ctx } = fakePi({
+        getSessionId: () => childUuid,
+        getSessionFile: () => "/tmp/runs/42/run-3/session.jsonl",
+      });
+      const mod = await import("../src/index.ts");
+      mod.default(pi);
+      const emit = async (event: string, payload: any) => {
+        const h = handlers.get(event);
+        if (h) await h({ type: event, ...payload }, ctx);
+      };
+
+      await emit("session_start", { reason: "startup" });
+      await emit("session_shutdown", { reason: "quit" });
+
+      const session = allSpans().find((s) => s.name === "pi.session")!;
+      assert.ok(session, "session span");
+      const sa = attrsToRecord(session.attributes);
+      assert.equal(sa["pi.session.id"], childUuid, "child id from getSessionId, not the literal 'session' basename");
+      assert.equal(sa["pi.session.parent_id"], parentUuid, "parent linked through the env fallback");
+    } finally {
+      delete process.env.PI_OTEL_PARENT_SESSION_ID;
+    }
   });
 });

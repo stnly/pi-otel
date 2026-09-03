@@ -75,6 +75,20 @@ export function normalizeLogPayload(data: unknown): LogChannelPayload | null {
   return { eventName, severity, body, attributes };
 }
 
+/**
+ * Extract the plain-UUID session id from a session-file basename.
+ *
+ * pi names interactive session files `<timestamp>_<uuid>.jsonl`, while
+ * `SessionManager.getSessionId()` reports the bare UUID. Emitting the same
+ * UUID everywhere keeps `pi.session.id` and `pi.session.parent_id` on one
+ * format so join queries work uniformly. A stem without a trailing
+ * canonical UUID keeps its previous whole-stem value.
+ */
+export function extractSessionId(stem: string): string {
+  const m = stem.match(/(?:^|_)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i);
+  return m?.[1] ?? stem;
+}
+
 export default function (pi: ExtensionAPI): void {
   // Commands are registered up front so /otel-status works even before
   // a session starts (e.g. to debug why nothing is exporting).
@@ -121,8 +135,17 @@ export default function (pi: ExtensionAPI): void {
     }
   };
   const sessionId = () => {
+    try {
+      // SessionManager.getSessionId() is the canonical source. Prefer it:
+      // subagent-spawned children keep session files at
+      // .../<runId>/run-N/session.jsonl, so a bare basename would yield the
+      // literal string "session" for every child run.
+      const id = lastCtx?.sessionManager?.getSessionId?.();
+      if (id) return id;
+    } catch { /* fall through to file-based derivation */ }
     const f = sessionFile();
-    return f ? basename(f, ".jsonl") : undefined;
+    if (!f) return undefined;
+    return extractSessionId(basename(f, ".jsonl"));
   };
 
   const clearAbortListener = (): void => {
@@ -183,8 +206,11 @@ export default function (pi: ExtensionAPI): void {
   pi.on("session_start", async (event, ctx) => {
     lastCtx = ctx;
     const parentId = event.previousSessionFile
-      ? basename(event.previousSessionFile, ".jsonl")
-      : undefined;
+      ? extractSessionId(basename(event.previousSessionFile, ".jsonl"))
+      : // Subagent-spawned children start with reason=startup and no
+        // previousSessionFile. Orchestrators that publish the convention set
+        // an env var; consume it here so pi.session.parent_id links the tree.
+        process.env.PI_OTEL_PARENT_SESSION_ID || process.env.PI_SUBAGENT_PARENT_SESSION || undefined;
     await start(ctx, event.reason, parentId);
     if (cfg.selfLogs && runtime) {
       emitLog(

@@ -62,7 +62,7 @@ Token usage uses a histogram. The semconv is explicit about this. Histograms let
 
 **Tags session origin.** Every session span carries `pi.session.reason` with the value pi reported for the start: `startup`, `reload`, `new`, `resume`, or `fork`. Filter to forks to see branched sessions apart from primary ones.
 
-**Links sessions to their parent.** On `new`, `resume`, and `fork` starts the session span also carries `pi.session.parent_id` (the parent session's filename stem, matching `pi.session.id`). A backend that renders parent links reconstructs the full fork and resume tree for a working session, so you can trace where a branched conversation came from.
+**Links sessions to their parent.** On `new`, `resume`, and `fork` starts the session span also carries `pi.session.parent_id` (the parent session's canonical UUID, matching `pi.session.id`). `pi.session.id` itself resolves through `SessionManager.getSessionId()` — pi's own session identity — falling back to the UUID extracted from the session filename, so subagent-spawned children (whose session files live at `run-N/session.jsonl` and would otherwise all report the literal id `session`) get their real id too. A backend that renders parent links reconstructs the full fork and resume tree for a working session, so you can trace where a branched conversation came from. Subagent children that start with no `previousSessionFile` link to their orchestrating session through `PI_OTEL_PARENT_SESSION_ID` (or the `PI_SUBAGENT_PARENT_SESSION` convention some orchestrators publish), tying the whole run tree together.
 
 **Shuts down on a deadline.** `forceFlush` and `shutdown` race `PI_OTEL_SHUTDOWN_TIMEOUT_MS` (default 2000ms). A dead collector records the failure on `health.lastShutdownError` and pi still exits. A 60s unref'd sweep ends spans open longer than 30 minutes as `pi.orphaned`, including paths that skip `session_shutdown`. SIGTERM and SIGHUP run best-effort shutdown for container stops and closed terminals, and restore default signal termination once the flush finishes when no other handler owns the signal. The extension does not hook `exit` or `beforeExit`.
 
@@ -190,7 +190,7 @@ Standard OTel, honored verbatim:
 
 Extension-specific:
 
-`PI_OTEL_ENABLED`, `PI_OTEL_DISABLED`, `PI_OTEL_CAPTURE_CONTENT`, `PI_OTEL_SAMPLE_RATIO`, `PI_OTEL_SEMCONV` (accepts `1.36`, `1.37`, or `1.43`), `PI_OTEL_TRACES`, `PI_OTEL_METRICS`, `PI_OTEL_LOGS`, `PI_OTEL_SELF_LOGS`, `PI_OTEL_DIAG_LOG_LEVEL`, `PI_OTEL_SHUTDOWN_TIMEOUT_MS`. Per-signal exporter env vars `OTEL_TRACES_EXPORTER`, `OTEL_METRICS_EXPORTER`, and `OTEL_LOGS_EXPORTER` accept `otlp`, `console`, and `none` (comma-separated).
+`PI_OTEL_ENABLED`, `PI_OTEL_DISABLED`, `PI_OTEL_CAPTURE_CONTENT`, `PI_OTEL_SAMPLE_RATIO`, `PI_OTEL_SEMCONV` (accepts `1.36`, `1.37`, or `1.43`), `PI_OTEL_TRACES`, `PI_OTEL_METRICS`, `PI_OTEL_LOGS`, `PI_OTEL_SELF_LOGS`, `PI_OTEL_DIAG_LOG_LEVEL`, `PI_OTEL_SHUTDOWN_TIMEOUT_MS`, `PI_OTEL_PARENT_SESSION_ID` (links a subagent child session to its orchestrating session as `pi.session.parent_id`; `PI_SUBAGENT_PARENT_SESSION` is honored as an alternate name). Per-signal exporter env vars `OTEL_TRACES_EXPORTER`, `OTEL_METRICS_EXPORTER`, and `OTEL_LOGS_EXPORTER` accept `otlp`, `console`, and `none` (comma-separated).
 
 Per-signal exporter tokens and the `DELTA` metric default are described above. `tracesExportInterval` and `logsExportInterval` set each signal's batch processor `scheduledDelayMillis`. `metricExportInterval` sets the metric reader's export interval.
 
