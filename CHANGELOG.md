@@ -13,13 +13,15 @@ All notable changes to this project are documented in this file. The format foll
 ### Fixed
 
 - Auto-retried runs no longer fragment the trace tree. pi re-runs the agent loop after `agent_end` when a provider error is retryable or overflow recovery compacts, without refiring `before_agent_start`; the interaction previously closed at `agent_end`, so retried turns were dropped and retry LLM spans exported as root spans on a new trace id. The interaction now closes on `agent_settled` (pi 0.80.5+), and any run pi starts without a user prompt (a retry re-run on older pi, or an extension-triggered turn on an idle session) opens an interaction tagged `pi.interaction.origin=agent` that does not count as a user prompt. The end-to-end suite replays the retry flow and asserts the single-interaction property.
+- A `console` exporter no longer corrupts `pi --mode json` output. Console stripping was keyed on `hasUI` alone (true in TUI and rpc modes), but json mode reports `hasUI: false` while streaming session events as JSON lines on the same stdout the console exporter writes to. Stripping now keys on the run mode: console survives only in print mode, and a console-only configuration in a stripped mode falls back to `otlp`.
 - `service.version` now reports the running pi's real version. The previous resolution used `import.meta.resolve`, which jiti rewrites to an undefined global inside loaded extensions, so it always fell back to `unknown`.
+- Session startup no longer dies in containers running an unregistered UID: `os.userInfo()` throws there (no passwd entry), which previously aborted the whole telemetry runtime; `process.owner` now resolves to `unknown` instead.
 
 ### Added
 
 - `pi.compaction.will_retry` on the compaction log record and metric attributes: overflow-recovery compactions (which retry the aborted turn) are now distinguishable from manual and threshold ones.
 - `pi.interaction.origin` (`user` | `agent`) on every interaction span.
-- A metrics test layer covering dialect-dependent instrument naming, and tracker tests for `ensureInteraction` and the 1.43 attribute set.
+- A metrics test layer covering dialect-dependent instrument naming, and tracker tests for `ensureInteraction` and the 1.43 attribute set. End-to-end replays now follow pi's real event order for overflow recovery (compaction between `agent_end` and the retry's `agent_start`) and cover an extension-triggered turn on an idle session, and `effectiveExporterTokens` is unit-tested for every run mode.
 
 ### Changed
 

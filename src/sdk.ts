@@ -94,9 +94,16 @@ export interface ExportHealth {
 }
 
 export interface RuntimeOptions {
-  /** When true, the process is running inside pi's TUI. Console exporters
-   *  would spam the UI, so the console token is stripped from every signal. */
+  /** When true, the process runs with a dialog-capable UI (pi's TUI and rpc
+   *  modes). Console exporters would spam the display, so the console token
+   *  is stripped from every signal. */
   hasUI?: boolean;
+  /** pi's run mode ("tui" | "rpc" | "json" | "print"). `json` mode streams
+   *  session events as JSON lines on stdout, so console exporters corrupt
+   *  that channel just like the TUI; they are stripped there too. Print mode
+   *  keeps console output as the documented debugging mirror. Undefined on
+   *  pi versions without ctx.mode; stripping then falls back to hasUI. */
+  mode?: string;
 }
 
 export interface TelemetryRuntime {
@@ -271,6 +278,15 @@ function trackHealth<T>(
   return exporter;
 }
 
+/** True when the OS reports a username; "unknown" when userInfo() throws
+ * (containers running an arbitrary UID with no passwd entry). */
+function processOwner(): string {
+  try {
+    return userInfo().username ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
 /**
  * Detect a stable host.id. Falls back to hostname when no platform id exists.
  */
@@ -327,7 +343,7 @@ export async function buildResource(cfg: ResolvedConfig): Promise<Resource> {
     "host.id": detectHostId(),
     "process.runtime.name": "node",
     "process.runtime.version": nodeVersion(),
-    "process.owner": userInfo().username ?? "unknown",
+    "process.owner": processOwner(),
     "pi.cwd": cfg.cwd,
     "pi.extension.name": TRACER_NAME,
     "pi.extension.version": TRACER_VERSION,
@@ -340,13 +356,21 @@ export async function buildResource(cfg: ResolvedConfig): Promise<Resource> {
 }
 
 /**
- * Resolve the exporter token list for one signal. In TUI mode, strip console
- * exporters: span/log JSON on stdout corrupts the terminal UI. If stripping
+ * Resolve the exporter token list for one signal. Console exporters are
+ * stripped whenever stdout is a protocol channel — the TUI renderer, the rpc
+ * JSON-RPC stream, or the json-mode event stream — because span/log JSON on
+ * stdout corrupts all three. Print mode's stdout carries only the final
+ * answer, so console stays as the documented debugging mirror. If stripping
  * leaves nothing (e.g. only console was configured), fall back to otlp so
  * telemetry is not silently dropped.
  */
-function effectiveExporterTokens(tokens: ExporterToken[], hasUI: boolean): ExporterToken[] {
-  let effective = hasUI ? tokens.filter((t) => t !== "console") : [...tokens];
+export function effectiveExporterTokens(
+  tokens: ExporterToken[],
+  hasUI: boolean,
+  mode: string | undefined = undefined,
+): ExporterToken[] {
+  const consoleCorruptsChannel = hasUI || mode === "json";
+  let effective = consoleCorruptsChannel ? tokens.filter((t) => t !== "console") : [...tokens];
   if (effective.length === 0) effective = ["otlp"];
   return effective;
 }
@@ -414,6 +438,7 @@ export async function startRuntime(
   opts: RuntimeOptions = {},
 ): Promise<TelemetryRuntime> {
   const hasUI = opts.hasUI ?? false;
+  const mode = opts.mode;
   const health: ExportHealth = {
     spansAccepted: 0,
     spansExported: 0,
@@ -435,7 +460,7 @@ export async function startRuntime(
   // --- Traces ---
   let traceProvider: BasicTracerProvider | undefined;
   if (cfg.enabled && cfg.traces.enabled) {
-    const traceTokens = effectiveExporterTokens(cfg.tracesExporters, hasUI);
+    const traceTokens = effectiveExporterTokens(cfg.tracesExporters, hasUI, mode);
     if (signalExportersActive(traceTokens)) {
       const spanProcessors = [];
       for (const token of traceTokens) {
@@ -476,7 +501,7 @@ export async function startRuntime(
   // --- Metrics ---
   let meterProvider: MeterProvider | undefined;
   if (cfg.enabled && cfg.metrics.enabled) {
-    const metricTokens = effectiveExporterTokens(cfg.metricsExporters, hasUI);
+    const metricTokens = effectiveExporterTokens(cfg.metricsExporters, hasUI, mode);
     if (signalExportersActive(metricTokens)) {
       const readers = [];
       for (const token of metricTokens) {
@@ -510,7 +535,7 @@ export async function startRuntime(
   // --- Logs ---
   let loggerProvider: LoggerProvider | undefined;
   if (cfg.enabled && cfg.logs.enabled) {
-    const logTokens = effectiveExporterTokens(cfg.logsExporters, hasUI);
+    const logTokens = effectiveExporterTokens(cfg.logsExporters, hasUI, mode);
     if (signalExportersActive(logTokens)) {
       const processors = [];
       for (const token of logTokens) {

@@ -140,7 +140,7 @@ export default function (pi: ExtensionAPI): void {
       // Re-resolve config with the session's cwd so project settings win.
       cfg = resolveConfig(ctx.cwd);
       if (!cfg.enabled) return;
-      const next = await startRuntime(cfg, { hasUI: ctx.hasUI });
+      const next = await startRuntime(cfg, { hasUI: ctx.hasUI, mode: ctx.mode });
       runtime = next;
       tracker = new SpanTracker({
         tracer: next.tracer,

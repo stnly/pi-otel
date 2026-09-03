@@ -18,6 +18,7 @@ import {
   resolveMetricTemporalityPreference,
   installSignalShutdown,
   buildSampler,
+  effectiveExporterTokens,
   piAtLeast,
   piVersion,
   type ExportHealth,
@@ -402,6 +403,37 @@ describe("per-signal exporters", () => {
     } finally {
       await rt.shutdown();
     }
+  });
+});
+
+describe("effectiveExporterTokens", () => {
+  test("print mode keeps console exporters", () => {
+    assert.deepEqual(
+      effectiveExporterTokens(["otlp", "console"], false, "print"),
+      ["otlp", "console"],
+    );
+    // No mode (older pi): hasUI alone decides.
+    assert.deepEqual(effectiveExporterTokens(["console"], false, undefined), ["console"]);
+  });
+
+  test("TUI and rpc modes strip console via hasUI", () => {
+    assert.deepEqual(effectiveExporterTokens(["otlp", "console"], true, "tui"), ["otlp"]);
+    assert.deepEqual(effectiveExporterTokens(["otlp", "console"], true, "rpc"), ["otlp"]);
+  });
+
+  test("json mode strips console even though hasUI is false", () => {
+    // pi's json mode streams session events as JSON lines on stdout; console
+    // exporter output would interleave with that protocol stream.
+    assert.deepEqual(effectiveExporterTokens(["otlp", "console"], false, "json"), ["otlp"]);
+  });
+
+  test("console-only configuration falls back to otlp when stripped", () => {
+    assert.deepEqual(effectiveExporterTokens(["console"], true, "tui"), ["otlp"]);
+    assert.deepEqual(effectiveExporterTokens(["console"], false, "json"), ["otlp"]);
+  });
+
+  test("order and dedupe are preserved by the caller's parse; stripping keeps order", () => {
+    assert.deepEqual(effectiveExporterTokens(["console", "otlp", "none"], true, "tui"), ["otlp", "none"]);
   });
 });
 

@@ -546,14 +546,32 @@ describe("end-to-end over real HTTP OTLP (JSON protocol)", () => {
       },
     });
     await emit("agent_end", { messages: [] });
-    await emit("agent_settled", {});
-    // Overflow-recovery compaction: pi reports the aborted turn will be retried.
+    // Overflow recovery, in pi's real order: compaction runs between the
+    // failed run's agent_end and the retry's agent_start (then, in this
+    // replay, the retry succeeds and the run settles).
     await emit("session_compact", {
       reason: "overflow",
       fromExtension: false,
       willRetry: true,
       compactionEntry: { tokensBefore: 12345 },
     });
+    await emit("agent_start", {});
+    await emit("turn_start", { turnIndex: 0, timestamp: Date.now() });
+    await emit("before_provider_request", { payload: {} });
+    await emit("after_provider_response", { status: 200, headers: {} });
+    await emit("turn_end", {
+      turnIndex: 0,
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "recovered" }],
+        model: "test-model",
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+        stopReason: "stop",
+      },
+      toolResults: [],
+    });
+    await emit("agent_end", { messages: [] });
+    await emit("agent_settled", {});
     await emit("session_shutdown", { reason: "quit" });
 
     assert.ok(received.logs.length > 0, "logs exported");
@@ -567,5 +585,54 @@ describe("end-to-end over real HTTP OTLP (JSON protocol)", () => {
     assert.equal(compactAttrs["pi.compaction.reason"], "overflow");
     assert.ok(eventNames.includes("pi.llm_request.error"), "pi.llm_request.error on HTTP >=400");
     assert.ok(eventNames.includes("pi.tool.error"), "pi.tool.error on failed tool");
+  });
+
+  test("an extension-triggered turn on an idle session opens an agent-origin interaction", async () => {
+    // sendCustomMessage({triggerTurn: true}) calls _runAgentPrompt directly:
+    // agent_start with no before_agent_start and no user prompt. The run must
+    // get an interaction span (agent origin), full span tree, and no prompt count.
+    resetReceived();
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = ENDPOINT;
+    const { pi, handlers, ctx } = fakePi();
+    const mod = await import("../src/index.ts");
+    mod.default(pi);
+    const emit = async (event: string, payload: any) => {
+      const h = handlers.get(event);
+      if (h) await h({ type: event, ...payload }, ctx);
+    };
+
+    await emit("session_start", { reason: "startup" });
+    // Idle session: an extension fires a custom message with triggerTurn.
+    await emit("agent_start", {});
+    await emit("turn_start", { turnIndex: 0, timestamp: Date.now() });
+    await emit("before_provider_request", { payload: {} });
+    await emit("after_provider_response", { status: 200, headers: {} });
+    await emit("turn_end", {
+      turnIndex: 0,
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "extension drove this" }],
+        model: "test-model",
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+        stopReason: "stop",
+      },
+      toolResults: [],
+    });
+    await emit("agent_end", { messages: [] });
+    await emit("agent_settled", {});
+    await emit("session_shutdown", { reason: "quit" });
+
+    const spans = allSpans();
+    const session = spans.find((s) => s.name === "pi.session")!;
+    assert.ok(session, "session span");
+    const interactions = spans.filter((s) => s.name === "pi.interaction");
+    assert.equal(interactions.length, 1, "one interaction for the extension-driven run");
+    const ia = attrsToRecord(interactions[0]!.attributes);
+    assert.equal(ia["pi.interaction.origin"], "agent", "agent origin, not a user prompt");
+    assert.ok(spans.some((s) => s.name === "pi.turn" && s.traceId === session.traceId), "turn on session trace");
+    assert.ok(spans.some((s) => s.name === "pi.llm_request" && s.traceId === session.traceId), "llm on session trace");
+    const metricNames = allMetricNames();
+    assert.ok(metricNames.includes("pi.turn.count"), "turn counted");
+    assert.ok(!metricNames.includes("pi.prompt.count"), "agent-origin run is not counted as a user prompt");
   });
 });
