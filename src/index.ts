@@ -89,6 +89,16 @@ export function extractSessionId(stem: string): string {
   return m?.[1] ?? stem;
 }
 
+/** Normalize an orchestrator-published parent reference to the same shape as
+ * pi.session.id: a bare UUID or file path both reduce to the UUID; a value
+ * with no trailing UUID is kept verbatim so custom ids still join. Returns
+ * undefined for empty or unset values. */
+export function normalizeParentRef(raw: string | undefined): string | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) return undefined;
+  return extractSessionId(basename(trimmed, ".jsonl"));
+}
+
 export default function (pi: ExtensionAPI): void {
   // Commands are registered up front so /otel-status works even before
   // a session starts (e.g. to debug why nothing is exporting).
@@ -210,7 +220,12 @@ export default function (pi: ExtensionAPI): void {
       : // Subagent-spawned children start with reason=startup and no
         // previousSessionFile. Orchestrators that publish the convention set
         // an env var; consume it here so pi.session.parent_id links the tree.
-        process.env.PI_OTEL_PARENT_SESSION_ID || process.env.PI_SUBAGENT_PARENT_SESSION || undefined;
+        // The value is normalized through the same basename/UUID extraction
+        // as previousSessionFile so parent ids join against pi.session.id
+        // whatever shape the orchestrator publishes (bare UUID, stem, or
+        // full path).
+        normalizeParentRef(process.env.PI_OTEL_PARENT_SESSION_ID) ??
+        normalizeParentRef(process.env.PI_SUBAGENT_PARENT_SESSION);
     await start(ctx, event.reason, parentId);
     if (cfg.selfLogs && runtime) {
       emitLog(

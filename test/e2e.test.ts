@@ -34,6 +34,7 @@ const E2E_ENV_KEYS = [
   "PI_OTEL_DISABLED",
   "PI_OTEL_SEMCONV",
   "PI_OTEL_PARENT_SESSION_ID",
+  "PI_SUBAGENT_PARENT_SESSION",
 ] as const;
 
 before(async () => {
@@ -718,6 +719,54 @@ describe("end-to-end over real HTTP OTLP (JSON protocol)", () => {
       assert.equal(sa["pi.session.id"], childUuid, "child id from getSessionId, not the literal 'session' basename");
       assert.equal(sa["pi.session.parent_id"], parentUuid, "parent linked through the env fallback");
     } finally {
+      delete process.env.PI_OTEL_PARENT_SESSION_ID;
+    }
+  });
+
+  test("env fallback normalizes the published shape and honors precedence", async () => {
+    // The alternate env var may carry a stem or full path; parent_id must
+    // reduce to the bare UUID to join against pi.session.id, and
+    // PI_OTEL_PARENT_SESSION_ID wins when both are set.
+    const childUuid = "019123ab-c1d0-7ef4-9a4b-cccccccccccc";
+    const parentUuid = "019123ab-c1d0-7ef4-9a4b-aaaaaaaaaaaa";
+    const otherParent = "019123ab-c1d0-7ef4-9a4b-dddddddddddd";
+    resetReceived();
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = ENDPOINT;
+    // Stem form through the alternate variable.
+    process.env.PI_SUBAGENT_PARENT_SESSION = `1728000000000_${parentUuid}`;
+    let spans: DecodedSpan[];
+    try {
+      const { pi, handlers, ctx } = fakePi({
+        getSessionId: () => childUuid,
+        getSessionFile: () => "/tmp/runs/42/run-4/session.jsonl",
+      });
+      const mod = await import("../src/index.ts");
+      mod.default(pi);
+      const emit = async (event: string, payload: any) => {
+        const h = handlers.get(event);
+        if (h) await h({ type: event, ...payload }, ctx);
+      };
+      await emit("session_start", { reason: "startup" });
+      await emit("session_shutdown", { reason: "quit" });
+      spans = allSpans();
+      let sa = attrsToRecord(spans.find((s) => s.name === "pi.session")!.attributes);
+      assert.equal(sa["pi.session.parent_id"], parentUuid, "stem-form alternate env value reduced to the UUID");
+
+      // Both set: PI_OTEL_PARENT_SESSION_ID takes precedence.
+      resetReceived();
+      process.env.PI_OTEL_PARENT_SESSION_ID = otherParent;
+      const { pi: pi2, handlers: handlers2, ctx: ctx2 } = fakePi({
+        getSessionId: () => childUuid,
+        getSessionFile: () => "/tmp/runs/42/run-5/session.jsonl",
+      });
+      const mod2 = await import("../src/index.ts");
+      mod2.default(pi2);
+      await handlers2.get("session_start")!({ type: "session_start", reason: "startup" }, ctx2);
+      await handlers2.get("session_shutdown")!({ type: "session_shutdown", reason: "quit" }, ctx2);
+      sa = attrsToRecord(allSpans().find((s) => s.name === "pi.session")!.attributes);
+      assert.equal(sa["pi.session.parent_id"], otherParent, "PI_OTEL_PARENT_SESSION_ID wins over the alternate");
+    } finally {
+      delete process.env.PI_SUBAGENT_PARENT_SESSION;
       delete process.env.PI_OTEL_PARENT_SESSION_ID;
     }
   });

@@ -28,7 +28,7 @@ All notable changes to this project are documented in this file. The format foll
 ### Added
 
 - `pi.compaction.will_retry` on the compaction log record and metric attributes: overflow-recovery compactions (which retry the aborted turn) are now distinguishable from manual and threshold ones.
-- `PI_OTEL_PARENT_SESSION_ID` (and the `PI_SUBAGENT_PARENT_SESSION` convention) links a subagent child session to its orchestrating session as `pi.session.parent_id` when the child starts with no `previousSessionFile`.
+- `PI_OTEL_PARENT_SESSION_ID` (and the `PI_SUBAGENT_PARENT_SESSION` convention) links a subagent child session to its orchestrating session as `pi.session.parent_id` when the child starts with no `previousSessionFile`. The published value is normalized to the same shape as `pi.session.id` — bare UUID, `<timestamp>_<uuid>` stem, or full session-file path all reduce to the UUID — and `PI_OTEL_PARENT_SESSION_ID` wins when both are set.
 - `pi.interaction.origin` (`user` | `agent`) on every interaction span.
 - A metrics test layer covering dialect-dependent instrument naming, and tracker tests for `ensureInteraction` and the 1.43 attribute set. End-to-end replays now follow pi's real event order for overflow recovery (compaction between `agent_end` and the retry's `agent_start`) and cover an extension-triggered turn on an idle session, and `effectiveExporterTokens` is unit-tested for every run mode.
 

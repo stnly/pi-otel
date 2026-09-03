@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { extractSessionId, normalizeLogPayload } from "../src/index.ts";
+import { extractSessionId, normalizeLogPayload, normalizeParentRef } from "../src/index.ts";
 
 describe("extractSessionId", () => {
   test("strips the timestamp prefix from an interactive session file stem", () => {
@@ -24,6 +24,28 @@ describe("extractSessionId", () => {
       "019123ab-c1d0-7ef4-9a4b-1c2d3e4f5a6b_extra",
     );
     assert.equal(extractSessionId("not-a-uuid-at-all"), "not-a-uuid-at-all");
+  });
+});
+
+describe("normalizeParentRef (orchestrator env values)", () => {
+  const uuid = "019123ab-c1d0-7ef4-9a4b-1c2d3e4f5a6b";
+
+  test("reduces every published shape to the bare UUID so parent ids join against pi.session.id", () => {
+    assert.equal(normalizeParentRef(uuid), uuid, "bare UUID unchanged");
+    assert.equal(normalizeParentRef(`1728000000000_${uuid}`), uuid, "stem reduced to UUID");
+    assert.equal(normalizeParentRef(`/runs/42/1728000000000_${uuid}.jsonl`), uuid, "full path reduced to UUID");
+    assert.equal(normalizeParentRef("  " + uuid + "  "), uuid, "surrounding whitespace trimmed");
+  });
+
+  test("keeps values without a UUID verbatim so custom session names still join", () => {
+    assert.equal(normalizeParentRef("my-orchestrator-run"), "my-orchestrator-run");
+    assert.equal(normalizeParentRef("/runs/42/session"), "session");
+  });
+
+  test("returns undefined for unset, empty, and whitespace-only values", () => {
+    assert.equal(normalizeParentRef(undefined), undefined);
+    assert.equal(normalizeParentRef(""), undefined);
+    assert.equal(normalizeParentRef("   "), undefined);
   });
 });
 
