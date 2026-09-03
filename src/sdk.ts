@@ -12,6 +12,12 @@
 import { readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { hostname, userInfo, version as nodeVersion } from "node:os";
+// VERSION is the running pi's own version string: pi's extension loader
+// aliases this specifier to the host package, so it reports the pi that is
+// executing this extension, not a bundled copy (which import.meta.resolve
+// or require.resolve could find instead — and under jiti, import.meta.resolve
+// is rewritten to an undefined global, so it returned "unknown").
+import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import { extensionVersion } from "./version.js";
 import {
   diag,
@@ -282,21 +288,29 @@ export function detectHostId(): string {
   return hostname();
 }
 
-let cachedPiVersion: string | undefined;
-function piVersion(): string {
-  if (cachedPiVersion !== undefined) return cachedPiVersion;
-  try {
-    const url = import.meta.resolve?.("@earendil-works/pi-coding-agent/package.json");
-    if (url) {
-      const pkg = JSON.parse(readFileSync(new URL(url), "utf8"));
-      cachedPiVersion = (pkg.version as string | undefined) ?? "unknown";
-      return cachedPiVersion;
-    }
-  } catch {
-    // ignore
-  }
-  cachedPiVersion = "unknown";
-  return cachedPiVersion;
+/** The running pi coding agent's version string ("0.0.0" if unreadable). */
+export function piVersion(): string {
+  return typeof PI_VERSION === "string" && PI_VERSION.length > 0 ? PI_VERSION : "0.0.0";
+}
+
+/** True when the running pi is at least `min` (semver major.minor.patch).
+ * Unresolvable or malformed versions compare as older than everything, so
+ * feature detection falls back to the conservative path. */
+export function piAtLeast(min: string, version: string = piVersion()): boolean {
+  const parse = (v: string): [number, number, number] | null => {
+    const m = /^(\d+)\.(\d+)\.(\d+)/.exec(v.trim());
+    if (!m) return null;
+    return [Number(m[1]), Number(m[2]), Number(m[3])];
+  };
+  const got = parse(version);
+  const want = parse(min);
+  if (!got || !want) return false;
+  const [g0, g1, g2] = got;
+  const [w0, w1, w2] = want;
+  if (g0 !== w0) return g0 > w0;
+  if (g1 !== w1) return g1 > w1;
+  if (g2 !== w2) return g2 > w2;
+  return true;
 }
 
 export async function buildResource(cfg: ResolvedConfig): Promise<Resource> {
@@ -511,7 +525,9 @@ export async function startRuntime(
           );
           processors.push(
             new CountingLogRecordProcessor(
-              new BatchLogRecordProcessor(exporter, {
+              // sdk-logs 0.220 moved the exporter into a single options object.
+              new BatchLogRecordProcessor({
+                exporter,
                 scheduledDelayMillis: cfg.logsExportInterval,
                 maxQueueSize: cfg.logsMaxQueueSize,
                 maxExportBatchSize: cfg.logsMaxExportBatchSize,
@@ -521,7 +537,7 @@ export async function startRuntime(
             ),
           );
         } else if (token === "console") {
-          processors.push(new SimpleLogRecordProcessor(new ConsoleLogRecordExporter()));
+          processors.push(new SimpleLogRecordProcessor({ exporter: new ConsoleLogRecordExporter() }));
         }
       }
       if (processors.length > 0) {

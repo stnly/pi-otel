@@ -18,8 +18,37 @@ import {
   resolveMetricTemporalityPreference,
   installSignalShutdown,
   buildSampler,
+  piAtLeast,
+  piVersion,
   type ExportHealth,
 } from "../src/sdk.ts";
+
+describe("pi version detection", () => {
+  test("piVersion returns a parseable semver string", () => {
+    const v = piVersion();
+    assert.match(v, /^\d+\.\d+\.\d+/, "semver major.minor.patch prefix");
+  });
+
+  test("piAtLeast compares major, minor, and patch in order", () => {
+    assert.equal(piAtLeast("0.80.5", "0.80.5"), true, "equal versions satisfy the floor");
+    assert.equal(piAtLeast("0.80.5", "0.80.4"), false, "patch below the floor");
+    assert.equal(piAtLeast("0.80.5", "0.81.0"), true, "minor above the floor");
+    assert.equal(piAtLeast("0.80.5", "1.0.0"), true, "major above the floor");
+    assert.equal(piAtLeast("0.80.5", "0.9.0"), false, "minor compared numerically: 9 < 80");
+    assert.equal(piAtLeast("0.80.5", "0.80.10"), true, "patch compared numerically, not lexically");
+  });
+
+  test("piAtLeast treats malformed versions as older than everything", () => {
+    assert.equal(piAtLeast("0.80.5", "unknown"), false);
+    assert.equal(piAtLeast("0.80.5", ""), false);
+    assert.equal(piAtLeast("0.80.5", "not.a.version"), false);
+  });
+
+  test("piAtLeast ignores prerelease suffixes", () => {
+    assert.equal(piAtLeast("0.80.5", "0.80.6-beta.1"), true);
+    assert.equal(piAtLeast("0.80.5", "0.80.5-rc.2"), true);
+  });
+});
 import { AggregationTemporalityPreference } from "@opentelemetry/exporter-metrics-otlp-http";
 import { resolveConfig } from "../src/config.ts";
 
@@ -418,21 +447,26 @@ describe("detectHostId", () => {
 
 describe("signal handler lifecycle", () => {
   test("shutdown removes the SIGTERM/SIGHUP handlers", async () => {
-    const before = process.listenerCount("SIGTERM") + process.listenerCount("SIGHUP");
+    // Baselines per signal: other libraries in the process (OTel SDK, node
+    // itself) may own their own signal listeners, so only the delta this
+    // runtime adds is asserted.
+    const beforeT = process.listenerCount("SIGTERM");
+    const beforeH = process.listenerCount("SIGHUP");
     const rt = await startRuntime(cfg());
-    assert.equal(process.listenerCount("SIGTERM"), before + 1, "SIGTERM handler registered");
-    assert.equal(process.listenerCount("SIGHUP"), before + 1, "SIGHUP handler registered");
+    assert.equal(process.listenerCount("SIGTERM"), beforeT + 1, "SIGTERM handler registered");
+    assert.equal(process.listenerCount("SIGHUP"), beforeH + 1, "SIGHUP handler registered");
     await rt.shutdown();
-    assert.equal(process.listenerCount("SIGTERM"), before, "SIGTERM handler removed on shutdown");
-    assert.equal(process.listenerCount("SIGHUP"), before, "SIGHUP handler removed on shutdown");
+    assert.equal(process.listenerCount("SIGTERM"), beforeT, "SIGTERM handler removed on shutdown");
+    assert.equal(process.listenerCount("SIGHUP"), beforeH, "SIGHUP handler removed on shutdown");
   });
 
   test("removeProcessHooks detaches without shutting down", async () => {
-    const before = process.listenerCount("SIGTERM") + process.listenerCount("SIGHUP");
+    const beforeT = process.listenerCount("SIGTERM");
+    const beforeH = process.listenerCount("SIGHUP");
     const rt = await startRuntime(cfg());
     rt.removeProcessHooks();
-    assert.equal(process.listenerCount("SIGTERM"), before, "SIGTERM handler detached");
-    assert.equal(process.listenerCount("SIGHUP"), before, "SIGHUP handler detached");
+    assert.equal(process.listenerCount("SIGTERM"), beforeT, "SIGTERM handler detached");
+    assert.equal(process.listenerCount("SIGHUP"), beforeH, "SIGHUP handler detached");
     // flush still works after detaching (the runtime is not shut down).
     await rt.flush();
     await rt.shutdown();
