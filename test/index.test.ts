@@ -85,6 +85,15 @@ describe("normalizeLogPayload (pi-otel:log channel validation)", () => {
     assert.ok(Buffer.byteLength(v, "utf8") <= 64 * 1024, "within 64 KiB");
   });
 
+  test("clamps an oversized eventName", () => {
+    const long = "e".repeat(100 * 1024);
+    const out = normalizeLogPayload({ eventName: long });
+    const v = out!.eventName as string;
+    assert.ok(v.length < long.length, "eventName was clamped");
+    assert.ok(v.endsWith("…[truncated]"), "truncation marker present");
+    assert.ok(Buffer.byteLength(v, "utf8") <= 64 * 1024, "within 64 KiB");
+  });
+
   test("clamps a long body", () => {
     const long = "b".repeat(100 * 1024);
     const out = normalizeLogPayload({ eventName: "e", body: long });

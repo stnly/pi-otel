@@ -19,6 +19,7 @@ import {
   installSignalShutdown,
   buildSampler,
   effectiveExporterTokens,
+  grpcMetadataFromHeaders,
   piAtLeast,
   piVersion,
   type ExportHealth,
@@ -94,6 +95,41 @@ describe("startRuntime", () => {
       assert.ok(rt.logger, "logger bound to this runtime");
       assert.ok(typeof rt.flush === "function");
       assert.ok(typeof rt.shutdown === "function");
+    } finally {
+      await rt.shutdown();
+    }
+  });
+
+  test("a malformed traces endpoint fails that signal alone, not the runtime", async () => {
+    // The exporter constructor throws on an unparseable URL. That must land
+    // on health.tracesError with metrics and logs still live.
+    const rt = await startRuntime(cfg({
+      tracesEndpoint: "not a url at all",
+      metricsEndpoint: "http://127.0.0.1:9/v1/metrics",
+      logsEndpoint: "http://127.0.0.1:9/v1/logs",
+    }));
+    try {
+      assert.ok(rt.health.tracesError?.includes("Could not parse"), "construction error surfaced");
+      assert.equal(rt.health.metricsError, undefined, "metrics unaffected");
+      assert.equal(rt.health.logsError, undefined, "logs unaffected");
+      assert.ok(rt.meterProvider, "meter provider still built");
+      assert.ok(rt.loggerProvider, "logger provider still built");
+    } finally {
+      await rt.shutdown();
+    }
+  });
+
+  test("all three endpoints malformed still yields a usable runtime", async () => {
+    const rt = await startRuntime(cfg({
+      tracesEndpoint: "not a url",
+      metricsEndpoint: "also not a url",
+      logsEndpoint: "still not a url",
+    }));
+    try {
+      assert.ok(rt.health.tracesError && rt.health.metricsError && rt.health.logsError);
+      assert.ok(rt.tracer, "no-op tracer available");
+      assert.equal(rt.metrics, null, "no metrics instruments");
+      assert.equal(rt.logger, null, "no logger");
     } finally {
       await rt.shutdown();
     }
@@ -403,6 +439,21 @@ describe("per-signal exporters", () => {
     } finally {
       await rt.shutdown();
     }
+  });
+});
+
+describe("grpcMetadataFromHeaders", () => {
+  test("converts plain headers into grpc Metadata", async () => {
+    const metadata = await grpcMetadataFromHeaders({ "x-api-key": "secret", authorization: "Bearer tok" });
+    const grpcjs = await import("@grpc/grpc-js");
+    assert.ok(metadata instanceof grpcjs.Metadata, "grpc Metadata instance");
+    assert.equal(metadata.get("x-api-key")[0], "secret");
+    assert.equal(metadata.get("authorization")[0], "Bearer tok");
+  });
+
+  test("empty headers yield empty metadata", async () => {
+    const metadata = await grpcMetadataFromHeaders({});
+    assert.equal(metadata.get("x-api-key").length, 0);
   });
 });
 

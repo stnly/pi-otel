@@ -56,7 +56,7 @@ const ALLOWED_SEVERITIES = new Set(["trace", "debug", "info", "warn", "warning",
 export function normalizeLogPayload(data: unknown): LogChannelPayload | null {
   if (!data || typeof data !== "object") return null;
   const d = data as Record<string, unknown>;
-  const eventName = typeof d.eventName === "string" ? d.eventName : null;
+  const eventName = typeof d.eventName === "string" ? clampAttr(d.eventName) : null;
   if (!eventName) return null;
   const severity =
     typeof d.severity === "string" && ALLOWED_SEVERITIES.has(d.severity.toLowerCase())

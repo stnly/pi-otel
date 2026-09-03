@@ -345,6 +345,59 @@ describe("llm usage attribution", () => {
     assert.equal(span.attributes["error.type"], "server_error");
     assert.equal(span.status.code, SpanStatusCode.ERROR);
   });
+
+  test("derives error.type from the message when no HTTP response was seen", async () => {
+    // Connection-refused style failure: after_provider_response never fires,
+    // so no HTTP category exists. Tail-sampling keyed on error.type must
+    // still see the failure.
+    h.tracker.startSession();
+    h.tracker.startInteraction("p");
+    h.tracker.startTurn(0);
+    h.tracker.startLlm("m", "p");
+    h.tracker.completeLlm(asstMsg({
+      stopReason: "error",
+      errorMessage: "TypeError: fetch failed: connect ECONNREFUSED 127.0.0.1:443",
+    }));
+    h.tracker.endTurn(); h.tracker.endInteraction(); h.tracker.endSession();
+    await h.flush();
+    const span = h.span(SPAN_LLM_REQUEST);
+    assert.equal(span.attributes["error.type"], "network_error");
+    assert.equal(span.attributes["exception.message"], "TypeError: fetch failed: connect ECONNREFUSED 127.0.0.1:443");
+    assert.equal(span.status.code, SpanStatusCode.ERROR);
+  });
+
+  test("HTTP category wins over the message-derived error.type", async () => {
+    // A 429 was observed on the wire and then the stream died with a network
+    // message: the final attempt's HTTP category is the more specific signal.
+    h.tracker.startSession();
+    h.tracker.startInteraction("p");
+    h.tracker.startTurn(0);
+    h.tracker.startLlm("m", "p");
+    h.tracker.recordProviderResponse(429, {});
+    h.tracker.completeLlm(asstMsg({
+      stopReason: "error",
+      errorMessage: "TypeError: fetch failed: socket hang up",
+    }));
+    h.tracker.endTurn(); h.tracker.endInteraction(); h.tracker.endSession();
+    await h.flush();
+    const span = h.span(SPAN_LLM_REQUEST);
+    assert.equal(span.attributes["error.type"], "rate_limit");
+  });
+
+  test("message without a network pattern falls back to the exception name", async () => {
+    h.tracker.startSession();
+    h.tracker.startInteraction("p");
+    h.tracker.startTurn(0);
+    h.tracker.startLlm("m", "p");
+    h.tracker.completeLlm(asstMsg({
+      stopReason: "error",
+      errorMessage: "SyntaxError: unexpected token in response",
+    }));
+    h.tracker.endTurn(); h.tracker.endInteraction(); h.tracker.endSession();
+    await h.flush();
+    const span = h.span(SPAN_LLM_REQUEST);
+    assert.equal(span.attributes["error.type"], "SyntaxError");
+  });
 });
 
 describe("llm metrics", () => {

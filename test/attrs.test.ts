@@ -101,6 +101,29 @@ describe("clampAttr", () => {
     assert.match(s, /circular/);
   });
 
+  test("shared (non-circular) references serialize at every occurrence", () => {
+    // A DAG: the same object in two places is not a cycle. Tool arguments
+    // commonly repeat references; degrading them to [circular] lost content.
+    const shared = { x: 1 };
+    const s = clampAttr({ a: shared, b: shared });
+    assert.deepEqual(JSON.parse(s), { a: { x: 1 }, b: { x: 1 } });
+  });
+
+  test("a root that sits on a cycle still serializes its other fields", () => {
+    const a: Record<string, unknown> = { name: "root" };
+    a.self = a;
+    const s = clampAttr(a);
+    assert.deepEqual(JSON.parse(s), { name: "root", self: "[circular]" });
+  });
+
+  test("repeated Error instances serialize at every occurrence", () => {
+    const e = new Error("boom");
+    const s = clampAttr({ first: e, second: e });
+    assert.ok(s.includes("boom"), "content present");
+    const parsed = JSON.parse(s) as { first: unknown; second: unknown };
+    assert.ok(parsed.first && parsed.second, "both occurrences serialized");
+  });
+
   test("handles nested circular references", () => {
     const a: Record<string, unknown> = { name: "a" };
     const b: Record<string, unknown> = { name: "b" };

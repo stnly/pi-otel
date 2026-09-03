@@ -212,18 +212,47 @@ const SAFE_STRINGIFY_REPLACER = (_k: string, v: unknown): unknown => {
   if (v instanceof Error) {
     return { name: v.name, message: v.message, stack: v.stack };
   }
-  if (v && typeof v === "object") {
-    if (circularSeen.has(v)) return "[circular]";
-    circularSeen.add(v);
-  }
+  // The replacer runs once for the root with key ""; a root that sits on a
+  // cycle must still serialize (its inner back-reference gets cut instead).
+  if (_k !== "" && v && typeof v === "object" && cyclicObjects.has(v)) return "[circular]";
   return v;
 };
 
-// Per-call WeakSet, reset each invocation.
-let circularSeen = new WeakSet<object>();
+/** Objects that sit on a true reference cycle. Shared-but-acyclic references
+ * (the same object in two places, common in tool args) are NOT included, so
+ * they serialize in full at each occurrence. */
+let cyclicObjects = new Set<object>();
+
+/** Walk the value and collect only true cycle members: an object reachable
+ * from itself. Getters may throw; those subtrees are skipped and left to
+ * JSON.stringify's own failure path in safeStringify. */
+function collectCycles(root: unknown): Set<object> {
+  const cycles = new Set<object>();
+  const path = new Set<object>();
+  const walk = (node: unknown): void => {
+    if (!node || typeof node !== "object") return;
+    if (path.has(node)) {
+      cycles.add(node);
+      return;
+    }
+    path.add(node);
+    try {
+      if (Array.isArray(node)) {
+        for (const v of node) walk(v);
+      } else {
+        for (const v of Object.values(node)) walk(v);
+      }
+    } catch {
+      // exotic getter threw during the walk; skip this subtree
+    }
+    path.delete(node);
+  };
+  walk(root);
+  return cycles;
+}
 
 function safeStringify(value: unknown): string {
-  circularSeen = new WeakSet();
+  cyclicObjects = collectCycles(value);
   try {
     return JSON.stringify(value, SAFE_STRINGIFY_REPLACER) ?? "null";
   } catch {

@@ -133,6 +133,18 @@ export interface ExporterOpts {
   timeoutMillis: number;
 }
 
+/** Build grpc Metadata from plain headers. The grpc exporter config omits
+ * `headers` (it takes `metadata` instead), so passing headers straight through
+ * silently drops authentication on gRPC. */
+export async function grpcMetadataFromHeaders(
+  headers: Record<string, string>,
+): Promise<import("@grpc/grpc-js").Metadata> {
+  const { Metadata } = await import("@grpc/grpc-js");
+  const metadata = new Metadata();
+  for (const [k, v] of Object.entries(headers)) metadata.set(k, v);
+  return metadata;
+}
+
 /**
  * Resolve metric aggregation temporality without mutating process.env.
  * Honors OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE when set; defaults
@@ -150,8 +162,11 @@ export function resolveMetricTemporalityPreference(
 
 async function newTraceExporter(p: Protocol, o: ExporterOpts): Promise<SpanExporter> {
   if (p === "grpc") {
-    const { OTLPTraceExporter } = await import("@opentelemetry/exporter-trace-otlp-grpc");
-    return new OTLPTraceExporter(o);
+    const [{ OTLPTraceExporter }, metadata] = await Promise.all([
+      import("@opentelemetry/exporter-trace-otlp-grpc"),
+      grpcMetadataFromHeaders(o.headers),
+    ]);
+    return new OTLPTraceExporter({ url: o.url, metadata, timeoutMillis: o.timeoutMillis });
   }
   if (p === "http/json") {
     const { OTLPTraceExporter } = await import("@opentelemetry/exporter-trace-otlp-http");
@@ -162,8 +177,16 @@ async function newTraceExporter(p: Protocol, o: ExporterOpts): Promise<SpanExpor
 async function newMetricExporter(p: Protocol, o: ExporterOpts): Promise<PushMetricExporter> {
   const opts = { ...o, temporalityPreference: resolveMetricTemporalityPreference() };
   if (p === "grpc") {
-    const { OTLPMetricExporter } = await import("@opentelemetry/exporter-metrics-otlp-grpc");
-    return new OTLPMetricExporter(opts);
+    const [{ OTLPMetricExporter }, metadata] = await Promise.all([
+      import("@opentelemetry/exporter-metrics-otlp-grpc"),
+      grpcMetadataFromHeaders(o.headers),
+    ]);
+    return new OTLPMetricExporter({
+      url: o.url,
+      metadata,
+      timeoutMillis: o.timeoutMillis,
+      temporalityPreference: opts.temporalityPreference,
+    });
   }
   if (p === "http/json") {
     const { OTLPMetricExporter } = await import("@opentelemetry/exporter-metrics-otlp-http");
@@ -173,8 +196,11 @@ async function newMetricExporter(p: Protocol, o: ExporterOpts): Promise<PushMetr
 }
 async function newLogExporter(p: Protocol, o: ExporterOpts): Promise<LogRecordExporter> {
   if (p === "grpc") {
-    const { OTLPLogExporter } = await import("@opentelemetry/exporter-logs-otlp-grpc");
-    return new OTLPLogExporter(o);
+    const [{ OTLPLogExporter }, metadata] = await Promise.all([
+      import("@opentelemetry/exporter-logs-otlp-grpc"),
+      grpcMetadataFromHeaders(o.headers),
+    ]);
+    return new OTLPLogExporter({ url: o.url, metadata, timeoutMillis: o.timeoutMillis });
   }
   if (p === "http/json") {
     const { OTLPLogExporter } = await import("@opentelemetry/exporter-logs-otlp-http");
@@ -466,13 +492,22 @@ export async function startRuntime(
       for (const token of traceTokens) {
         if (token === "none") continue;
         if (token === "otlp") {
-          const exporter = trackHealth(
-            await newTraceExporter(cfg.protocol, { url: cfg.tracesEndpoint, headers: cfg.headers, timeoutMillis: cfg.tracesExportTimeoutMs }),
-            (ok, count, err) => {
-              if (ok) { health.spansExported += count; health.tracesError = undefined; }
-              else { health.tracesError = err; }
-            },
-          );
+          // A malformed endpoint URL throws in the exporter constructor. Fail
+          // this signal alone and keep the others: one typo'd endpoint must
+          // not take down the whole runtime, and /otel-status shows the error.
+          let exporter: SpanExporter;
+          try {
+            exporter = trackHealth(
+              await newTraceExporter(cfg.protocol, { url: cfg.tracesEndpoint, headers: cfg.headers, timeoutMillis: cfg.tracesExportTimeoutMs }),
+              (ok, count, err) => {
+                if (ok) { health.spansExported += count; health.tracesError = undefined; }
+                else { health.tracesError = err; }
+              },
+            );
+          } catch (err) {
+            health.tracesError = `exporter construction failed: ${err instanceof Error ? err.message : String(err)}`;
+            continue;
+          }
           spanProcessors.push(
             new CountingSpanProcessor(
               new BatchSpanProcessor(exporter, {
@@ -507,13 +542,19 @@ export async function startRuntime(
       for (const token of metricTokens) {
         if (token === "none") continue;
         if (token === "otlp") {
-          const exporter = trackHealth(
-            await newMetricExporter(cfg.protocol, { url: cfg.metricsEndpoint, headers: cfg.headers, timeoutMillis: cfg.metricsExportTimeoutMs }),
-            (ok, _count, err) => {
-              if (ok) { health.metricBatchesExported++; health.metricsError = undefined; }
-              else { health.metricsError = err; }
-            },
-          );
+          let exporter: PushMetricExporter;
+          try {
+            exporter = trackHealth(
+              await newMetricExporter(cfg.protocol, { url: cfg.metricsEndpoint, headers: cfg.headers, timeoutMillis: cfg.metricsExportTimeoutMs }),
+              (ok, _count, err) => {
+                if (ok) { health.metricBatchesExported++; health.metricsError = undefined; }
+                else { health.metricsError = err; }
+              },
+            );
+          } catch (err) {
+            health.metricsError = `exporter construction failed: ${err instanceof Error ? err.message : String(err)}`;
+            continue;
+          }
           readers.push(
             new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: cfg.metricExportInterval }),
           );
@@ -541,13 +582,19 @@ export async function startRuntime(
       for (const token of logTokens) {
         if (token === "none") continue;
         if (token === "otlp") {
-          const exporter = trackHealth(
-            await newLogExporter(cfg.protocol, { url: cfg.logsEndpoint, headers: cfg.headers, timeoutMillis: cfg.logsExportTimeoutMs }),
-            (ok, count, err) => {
-              if (ok) { health.logRecordsExported += count; health.logsError = undefined; }
-              else { health.logsError = err; }
-            },
-          );
+          let exporter: LogRecordExporter;
+          try {
+            exporter = trackHealth(
+              await newLogExporter(cfg.protocol, { url: cfg.logsEndpoint, headers: cfg.headers, timeoutMillis: cfg.logsExportTimeoutMs }),
+              (ok, count, err) => {
+                if (ok) { health.logRecordsExported += count; health.logsError = undefined; }
+                else { health.logsError = err; }
+              },
+            );
+          } catch (err) {
+            health.logsError = `exporter construction failed: ${err instanceof Error ? err.message : String(err)}`;
+            continue;
+          }
           processors.push(
             new CountingLogRecordProcessor(
               // sdk-logs 0.220 moved the exporter into a single options object.

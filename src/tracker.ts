@@ -158,6 +158,9 @@ function categorizeThrownError(combined: string, errName: string): string {
   if (/auth|unauthorized|forbidden/i.test(combined)) return "auth_error";
   if (/context.*(length|window)|too.*(large|long)/i.test(combined)) return "request_too_large";
   if (/content.?filter|safety/i.test(combined)) return "content_filter";
+  // Connection-level failures (VPN down, DNS, refused sockets) never produce
+  // an HTTP response, so they surface as thrown/stream errors only.
+  if (/econnrefused|enotfound|econnreset|ehostunreach|etimedout|epipe|fetch failed|network|socket hang up|dns|tls|certificate/i.test(combined)) return "network_error";
   return errName;
 }
 
@@ -629,6 +632,14 @@ export class SpanTracker {
       // Stamp the final attempt's HTTP category (when one was seen) before
       // the status below overrides the message with the provider's own text.
       this.applyLlmErrorState(llm.span);
+      if (finish === "error" && !llm.lastErrorType && message.errorMessage) {
+        // No HTTP response was seen (connection refused, DNS failure, TLS
+        // error): derive error.type from the message so tail-sampling and
+        // dashboards keyed on it still see the failure.
+        const m = /^([A-Za-z][A-Za-z0-9]*(?:Error|Exception))\s*:/.exec(message.errorMessage);
+        const errName = m?.[1] ?? "unknown";
+        llm.span.setAttribute(ATTR_ERROR_TYPE, categorizeThrownError(message.errorMessage, errName));
+      }
       llm.span.setStatus({
         code: SpanStatusCode.ERROR,
         message: message.errorMessage ?? finish,

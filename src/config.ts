@@ -383,10 +383,10 @@ export function resolveConfig(cwd: string): ResolvedConfig {
       10000,
     );
 
-  const sampleRatio = Math.min(
-    1,
-    Math.max(0, envNum(["OTEL_TRACES_SAMPLER_ARG", "PI_OTEL_SAMPLE_RATIO"], s.sampleRatio ?? 1)),
-  );
+  // Settings values arrive unvalidated JSON, so a non-numeric sampleRatio
+  // must fall back to 1 rather than propagate NaN into the sampler.
+  const rawRatio = envNum(["OTEL_TRACES_SAMPLER_ARG", "PI_OTEL_SAMPLE_RATIO"], s.sampleRatio ?? 1);
+  const sampleRatio = Number.isFinite(rawRatio) ? Math.min(1, Math.max(0, rawRatio)) : 1;
 
   return {
     enabled,

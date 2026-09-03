@@ -310,6 +310,24 @@ describe("sampling", () => {
     assert.equal(resolveConfig("/nonexistent").sampleRatio, 0);
   });
 
+  test("a non-numeric sampleRatio from settings falls back to 1, not NaN", () => {
+    // Settings values are unvalidated JSON; Math.min/max would propagate
+    // NaN straight into the sampler without this guard.
+    const fs = require("node:fs");
+    const os = require("node:os");
+    const pathMod = require("node:path");
+    const dir = fs.mkdtempSync(pathMod.join(os.tmpdir(), "pi-otel-cfg-"));
+    fs.mkdirSync(pathMod.join(dir, ".pi"), { recursive: true });
+    fs.writeFileSync(pathMod.join(dir, ".pi", "settings.json"), JSON.stringify({ otel: { sampleRatio: { nested: true } } }));
+    try {
+      const resolved = resolveConfig(dir);
+      assert.equal(resolved.sampleRatio, 1, "object sampleRatio resolves to 1");
+      assert.ok(Number.isFinite(resolved.sampleRatio), "never NaN");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("OTEL_TRACES_SAMPLER_ARG is honored", () => {
     process.env.OTEL_TRACES_SAMPLER_ARG = "0.25";
     assert.equal(resolveConfig("/nonexistent").sampleRatio, 0.25);
