@@ -549,7 +549,7 @@ export async function startRuntime(
   const tracer = traceProvider?.getTracer(TRACER_NAME, TRACER_VERSION) ?? noopTracer();
   // Bind instruments/logger to this runtime so a reload cannot keep writing
   // into a provider that has already been shut down.
-  const metrics = createMetrics(meterProvider);
+  const metrics = createMetrics(meterProvider, cfg.semconv);
   const logger = createLogger(loggerProvider);
 
   let shutdownStarted = false;

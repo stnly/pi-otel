@@ -30,10 +30,13 @@ export type SamplerSpec =
 /** GenAI attribute dialect, versioned by the opentelemetry/semantic-conventions
  * release that defined the attribute set. `1.36` is the pre-2025-10 set
  * (`gen_ai.system`, message span events). `1.37` is the 2025-10 rework
- * (`gen_ai.provider.name`, no message events). */
-export type SemconvDialect = "1.36" | "1.37";
+ * (`gen_ai.provider.name`, no message events). `1.43` additionally adopts the
+ * registry usage-attribute names (`gen_ai.usage.cache_read.input_tokens`,
+ * `cache_creation`, `reasoning.output_tokens`), `gen_ai.request.stream`, and
+ * the `gen_ai.client.operation.time_to_first_chunk` metric. */
+export type SemconvDialect = "1.36" | "1.37" | "1.43";
 
-export const DEFAULT_SEMCONV: SemconvDialect = "1.37";
+export const DEFAULT_SEMCONV: SemconvDialect = "1.43";
 
 export interface SignalConfig {
   enabled: boolean;
@@ -76,7 +79,7 @@ export interface ResolvedConfig {
   logs: SignalConfig;
   /** Sampler selection per OTEL_TRACES_SAMPLER. Default parentbased_traceidratio. */
   sampler: SamplerSpec;
-  /** GenAI convention version. Default 1.37. */
+  /** GenAI convention version. Default 1.43. */
   semconv: SemconvDialect;
   /** Exporter request timeout per signal, ms. Spec default 10000. */
   tracesExportTimeoutMs: number;
@@ -283,6 +286,7 @@ export function normalizeSemconv(v: string | undefined): SemconvDialect {
   const p = (v ?? "").trim().toLowerCase();
   if (p === "1.36") return "1.36";
   if (p === "1.37") return "1.37";
+  if (p === "1.43") return "1.43";
   return DEFAULT_SEMCONV;
 }
 

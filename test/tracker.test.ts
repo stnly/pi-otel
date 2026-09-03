@@ -4,10 +4,10 @@ import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import {
   ATTR_GEN_AI_INPUT_TOKENS,
   ATTR_GEN_AI_OUTPUT_TOKENS,
-  ATTR_GEN_AI_CACHE_READ_TOKENS,
-  ATTR_GEN_AI_CACHE_WRITE_TOKENS,
+  ATTR_GEN_AI_CACHE_CREATION_INPUT_TOKENS,
+  ATTR_GEN_AI_CACHE_READ_INPUT_TOKENS,
+  ATTR_GEN_AI_REASONING_OUTPUT_TOKENS,
   ATTR_GEN_AI_CACHE_WRITE_1H_TOKENS,
-  ATTR_GEN_AI_REASONING_TOKENS,
   ATTR_GEN_AI_COST_USD,
   ATTR_GEN_AI_REQUEST_MODEL,
   ATTR_GEN_AI_RESPONSE_MODEL,
@@ -213,8 +213,9 @@ describe("llm usage attribution", () => {
     const a = h.span(SPAN_LLM_REQUEST).attributes;
     assert.equal(a[ATTR_GEN_AI_INPUT_TOKENS], 100);
     assert.equal(a[ATTR_GEN_AI_OUTPUT_TOKENS], 50);
-    assert.equal(a[ATTR_GEN_AI_CACHE_READ_TOKENS], 30);
-    assert.equal(a[ATTR_GEN_AI_CACHE_WRITE_TOKENS], 20);
+    // Default dialect 1.43: registry usage-attribute names.
+    assert.equal(a[ATTR_GEN_AI_CACHE_READ_INPUT_TOKENS], 30);
+    assert.equal(a[ATTR_GEN_AI_CACHE_CREATION_INPUT_TOKENS], 20);
     assert.equal(a[ATTR_GEN_AI_CACHE_WRITE_1H_TOKENS], 5, "cache_write_1h must be captured (Anthropic 1h split)");
     assert.equal(a[ATTR_GEN_AI_COST_USD], 0.012);
   });
@@ -229,7 +230,7 @@ describe("llm usage attribution", () => {
     await h.flush();
     const a = h.span(SPAN_LLM_REQUEST).attributes;
     assert.equal(ATTR_GEN_AI_CACHE_WRITE_1H_TOKENS in a, false, "must not set 1h attr when undefined");
-    assert.equal(a[ATTR_GEN_AI_CACHE_WRITE_TOKENS], 10);
+    assert.equal(a[ATTR_GEN_AI_CACHE_CREATION_INPUT_TOKENS], 10);
   });
 
   test("records reasoning tokens when reported", async () => {
@@ -241,7 +242,7 @@ describe("llm usage attribution", () => {
     h.tracker.endTurn(); h.tracker.endInteraction(); h.tracker.endSession();
     await h.flush();
     const a = h.span(SPAN_LLM_REQUEST).attributes;
-    assert.equal(a[ATTR_GEN_AI_REASONING_TOKENS], 42, "reasoning tokens captured");
+    assert.equal(a[ATTR_GEN_AI_REASONING_OUTPUT_TOKENS], 42, "reasoning tokens captured");
   });
 
   test("omits reasoning tokens attribute when not reported", async () => {
@@ -253,7 +254,7 @@ describe("llm usage attribution", () => {
     h.tracker.endTurn(); h.tracker.endInteraction(); h.tracker.endSession();
     await h.flush();
     const a = h.span(SPAN_LLM_REQUEST).attributes;
-    assert.equal(ATTR_GEN_AI_REASONING_TOKENS in a, false, "must not set reasoning attr when undefined");
+    assert.equal(ATTR_GEN_AI_REASONING_OUTPUT_TOKENS in a, false, "must not set reasoning attr when undefined");
   });
 
   test("records request and response model", async () => {
@@ -362,7 +363,7 @@ describe("llm metrics", () => {
     assert.equal(byType.output, 50);
   });
 
-  test("records cache and reasoning token types on the usage histogram", async () => {
+  test("usage histogram carries only input/output in 1.43; cache and reasoning live in span attrs", async () => {
     h.tracker.startSession();
     h.tracker.startInteraction("p");
     h.tracker.startTurn(0);
@@ -377,15 +378,17 @@ describe("llm metrics", () => {
       stopReason: "stop",
     }));
     h.tracker.endTurn(); h.tracker.endInteraction(); h.tracker.endSession();
+    await h.flush();
     const byType = Object.fromEntries(
       (h.metrics.histograms["tokens"] ?? []).map(r => [r.attrs["gen_ai.token.type"], r.value]),
     );
     assert.equal(byType.input, 10);
     assert.equal(byType.output, 5);
-    assert.equal(byType.cache_read, 30);
-    assert.equal(byType.cache_write, 20);
-    assert.equal(byType.cache_write_1h, 4);
-    assert.equal(byType.reasoning, 7);
+    assert.deepEqual(Object.keys(byType).sort(), ["input", "output"], "registry token types only");
+    const a = h.span(SPAN_LLM_REQUEST).attributes;
+    assert.equal(a[ATTR_GEN_AI_CACHE_READ_INPUT_TOKENS], 30, "cache read still on the span");
+    assert.equal(a[ATTR_GEN_AI_CACHE_CREATION_INPUT_TOKENS], 20, "cache write still on the span");
+    assert.equal(a[ATTR_GEN_AI_REASONING_OUTPUT_TOKENS], 7, "reasoning still on the span");
   });
 
   test("records provider retry on second response event", async () => {
@@ -1364,7 +1367,7 @@ describe("ensureInteraction", () => {
 // --- semconv dialect ----------------------------------------------------------
 
 describe("semconv dialect", () => {
-  function runCaptured(semconv: "1.36" | "1.37") {
+  function runCaptured(semconv: "1.36" | "1.37" | "1.43") {
     const hx = makeHarness({ captureContent: "full", semconv });
     hx.tracker.startSession();
     hx.tracker.startInteraction("dialect-prompt");
@@ -1420,7 +1423,7 @@ describe("semconv dialect", () => {
     assert.equal(choice?.attributes?.["finish_reason"], "tool_use");
   });
 
-  test("default is 1.37 when no semconv is passed", async () => {
+  test("default is 1.43 when no semconv is passed", async () => {
     const hx = makeHarness({ captureContent: "full" });
     hx.tracker.startSession();
     hx.tracker.startInteraction("p");
@@ -1430,7 +1433,88 @@ describe("semconv dialect", () => {
     hx.tracker.endTurn(); hx.tracker.endInteraction(); hx.tracker.endSession();
     await hx.flush();
     const a = hx.span(SPAN_LLM_REQUEST).attributes;
-    assert.equal(a["gen_ai.provider.name"], "anthropic", "1.37 is the default");
+    assert.equal(a["gen_ai.provider.name"], "anthropic", "1.43 keeps the renamed provider key");
     assert.equal(a[ATTR_GEN_AI_SYSTEM], undefined);
+    assert.equal(a["gen_ai.request.stream"], true, "1.43 records gen_ai.request.stream");
+  });
+
+  test("1.43 writes the registry usage-attribute names and not the pre-registry ones", async () => {
+    const hx = makeHarness({ captureContent: "full", semconv: "1.43" });
+    hx.tracker.startSession();
+    hx.tracker.startInteraction("p");
+    hx.tracker.startTurn(0);
+    hx.tracker.startLlm("m", "anthropic");
+    hx.tracker.completeLlm(
+      asstMsg({ text: "t", stopReason: "stop", input: 100, output: 20, cacheRead: 5, cacheWrite: 3, cacheWrite1h: 2, reasoning: 7 }),
+    );
+    hx.tracker.endTurn(); hx.tracker.endInteraction(); hx.tracker.endSession();
+    await hx.flush();
+    const a = hx.span(SPAN_LLM_REQUEST).attributes;
+    assert.equal(a["gen_ai.usage.input_tokens"], 100);
+    assert.equal(a["gen_ai.usage.output_tokens"], 20);
+    assert.equal(a["gen_ai.usage.cache_read.input_tokens"], 5, "registry cache-read name");
+    assert.equal(a["gen_ai.usage.cache_creation.input_tokens"], 3, "registry cache-write name");
+    assert.equal(a["gen_ai.usage.reasoning.output_tokens"], 7, "registry reasoning name");
+    assert.equal(a["gen_ai.usage.cache_write_1h_input_tokens"], 2, "extension-specific 1h split is kept");
+    assert.equal(a["gen_ai.usage.cache_read_input_tokens"], undefined, "no pre-registry cache-read key");
+    assert.equal(a["gen_ai.usage.cache_write_input_tokens"], undefined, "no pre-registry cache-write key");
+    assert.equal(a["gen_ai.usage.reasoning_tokens"], undefined, "no pre-registry reasoning key");
+  });
+
+  test("1.43 records only input/output token.type series on the usage metric", async () => {
+    const hx = makeHarness({ captureContent: "full", semconv: "1.43" });
+    hx.tracker.startSession();
+    hx.tracker.startInteraction("p");
+    hx.tracker.startTurn(0);
+    hx.tracker.startLlm("m", "anthropic");
+    hx.tracker.completeLlm(
+      asstMsg({ text: "t", stopReason: "stop", input: 100, output: 20, cacheRead: 5, cacheWrite: 3, reasoning: 7 }),
+    );
+    hx.tracker.endTurn(); hx.tracker.endInteraction(); hx.tracker.endSession();
+    await hx.flush();
+    const types = (hx.metrics.histograms["tokens"] ?? []).map((p) => p.attrs["gen_ai.token.type"]);
+    assert.deepEqual([...types].sort(), ["input", "output"], "registry token types only; cache/reasoning live in span attrs");
+  });
+
+  test("1.43 keeps the pre-registry token.type series for pinned older dialects", async () => {
+    const hx = makeHarness({ captureContent: "full", semconv: "1.37" });
+    hx.tracker.startSession();
+    hx.tracker.startInteraction("p");
+    hx.tracker.startTurn(0);
+    hx.tracker.startLlm("m", "anthropic");
+    hx.tracker.completeLlm(
+      asstMsg({ text: "t", stopReason: "stop", input: 100, output: 20, cacheRead: 5, cacheWrite: 3, cacheWrite1h: 1, reasoning: 7 }),
+    );
+    hx.tracker.endTurn(); hx.tracker.endInteraction(); hx.tracker.endSession();
+    await hx.flush();
+    const byType = Object.fromEntries(
+      (hx.metrics.histograms["tokens"] ?? []).map((p) => [p.attrs["gen_ai.token.type"], p.value]),
+    );
+    for (const t of ["input", "output", "cache_read", "cache_write", "cache_write_1h", "reasoning"]) {
+      assert.ok(t in byType, `1.37 keeps the ${t} series`);
+    }
+    const a = hx.span(SPAN_LLM_REQUEST).attributes;
+    assert.equal(a["gen_ai.usage.cache_read_input_tokens"], 5, "1.37 keeps its historical attribute names");
+    assert.equal(a["gen_ai.usage.cache_write_input_tokens"], 3);
+    assert.equal(a["gen_ai.usage.reasoning_tokens"], 7);
+  });
+
+  test("1.43 records gen_ai.response.time_to_first_chunk on first token", async () => {
+    const hx = makeHarness({ captureContent: "full", semconv: "1.43" });
+    hx.tracker.startSession();
+    hx.tracker.startInteraction("p");
+    hx.tracker.startTurn(0);
+    hx.tracker.startLlm("m", "anthropic");
+    hx.tracker.noteFirstToken({ role: "assistant" });
+    hx.tracker.completeLlm(asstMsg({ text: "t", stopReason: "stop" }));
+    hx.tracker.endTurn(); hx.tracker.endInteraction(); hx.tracker.endSession();
+    await hx.flush();
+    const a = hx.span(SPAN_LLM_REQUEST).attributes;
+    const ttfc = a["gen_ai.response.time_to_first_chunk"];
+    assert.equal(typeof ttfc, "number", "registry attribute present");
+    assert.ok((ttfc as number) >= 0 && (ttfc as number) < 60, "seconds-scaled value");
+    // The registry metric point is recorded through the same path; the
+    // instrument name selection is covered in metrics.test.ts.
+    assert.equal(hx.metrics.histograms["ttft"]?.length, 1, "ttft metric point recorded");
   });
 });

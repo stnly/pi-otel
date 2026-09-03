@@ -5,12 +5,16 @@ import { createHash } from "node:crypto";
  *
  * Names follow the published semantic conventions:
  *   - GenAI:      https://opentelemetry.io/docs/specs/semconv/gen-ai/
+ *     (development moved to the semantic-conventions-genai repo; the npm
+ *     registry release that last synced the GenAI set is 1.43.0)
  *   - Resource:   https://opentelemetry.io/docs/specs/semconv/resource/
  *   - HTTP:       https://opentelemetry.io/docs/specs/semconv/http/
  *   - Exceptions: https://opentelemetry.io/docs/specs/semconv/exceptions/
  *
  * `pi.*` attributes are extension-specific and documented in the README.
- * They do not collide with any registered semconv namespace.
+ * `gen_ai.usage.cost_usd` and `gen_ai.usage.cache_write_1h_input_tokens` are
+ * extension-specific values in the gen_ai namespace: no registry release
+ * defines a cost attribute, and none splits Anthropic's 1-hour cache writes.
  */
 
 // ---------------------------------------------------------------------------
@@ -35,15 +39,31 @@ export const ATTR_GEN_AI_RESPONSE_MODEL = "gen_ai.response.model";
 export const ATTR_GEN_AI_RESPONSE_ID = "gen_ai.response.id";
 export const ATTR_GEN_AI_RESPONSE_FINISH_REASONS = "gen_ai.response.finish_reasons";
 
-// Usage
+// Usage. input/output carry the same name in every dialect; the cache and
+// reasoning keys differ. The 1.36/1.37 names below predate the registry
+// (gen_ai.usage.cache_read_input_tokens & co. exist in no released set) and
+// are kept verbatim so pinned dialects keep emitting what they always did.
+// The 1.43 names are the registry's (synced in semantic-conventions 1.43.0
+// from the semantic-conventions-genai repo).
 export const ATTR_GEN_AI_INPUT_TOKENS = "gen_ai.usage.input_tokens";
 export const ATTR_GEN_AI_OUTPUT_TOKENS = "gen_ai.usage.output_tokens";
 export const ATTR_GEN_AI_TOKEN_TYPE = "gen_ai.token.type";
+// 1.36 / 1.37 dialect (historical, emitted verbatim under those dialects)
 export const ATTR_GEN_AI_CACHE_READ_TOKENS = "gen_ai.usage.cache_read_input_tokens";
 export const ATTR_GEN_AI_CACHE_WRITE_TOKENS = "gen_ai.usage.cache_write_input_tokens";
 export const ATTR_GEN_AI_CACHE_WRITE_1H_TOKENS = "gen_ai.usage.cache_write_1h_input_tokens";
 export const ATTR_GEN_AI_REASONING_TOKENS = "gen_ai.usage.reasoning_tokens";
+// 1.43 dialect (registry names). cache_creation is the registry name for a
+// provider-managed cache write (Anthropic's 5-minute retention bucket).
+export const ATTR_GEN_AI_CACHE_READ_INPUT_TOKENS = "gen_ai.usage.cache_read.input_tokens";
+export const ATTR_GEN_AI_CACHE_CREATION_INPUT_TOKENS = "gen_ai.usage.cache_creation.input_tokens";
+export const ATTR_GEN_AI_REASONING_OUTPUT_TOKENS = "gen_ai.usage.reasoning.output_tokens";
+// No registry release defines a cost attribute; extension-specific, all dialects.
 export const ATTR_GEN_AI_COST_USD = "gen_ai.usage.cost_usd";
+// Streaming: registry-defined from 1.43 (gen_ai.request.stream, seconds-valued
+// gen_ai.response.time_to_first_chunk).
+export const ATTR_GEN_AI_REQUEST_STREAM = "gen_ai.request.stream";
+export const ATTR_GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK = "gen_ai.response.time_to_first_chunk";
 
 // Tools
 export const ATTR_GEN_AI_TOOL_NAME = "gen_ai.tool.name";
@@ -113,17 +133,21 @@ export const spanToolName = (name: string): string => `pi.tool.${name}`;
 // Metric names
 // ---------------------------------------------------------------------------
 
-// GenAI semconv metrics that exist in released conventions (verified against
-// semantic-conventions v1.28 through v1.37; the client metric set in every
-// release is exactly these two).
+// GenAI client metrics in released registry sets. Through v1.37 the client
+// set is exactly operation.duration and token.usage. v1.43 synced the
+// semantic-conventions-genai additions: time_to_first_chunk and
+// time_per_output_chunk (the genai repo carries them as Development status).
 export const METRIC_OP_DURATION = "gen_ai.client.operation.duration";
 export const METRIC_TOKEN_USAGE = "gen_ai.client.token.usage";
+export const METRIC_GEN_AI_TIME_TO_FIRST_CHUNK = "gen_ai.client.operation.time_to_first_chunk";
 
-// pi-namespaced metrics. gen_ai.client.time_to_first_token, time_to_completion,
-// and tool.calls were never part of any released convention set, so they live
-// under pi.* until the semantic-conventions-genai repo cuts tagged releases;
-// its main branch defines gen_ai.client.operation.time_to_first_chunk, which a
-// future dated dialect will adopt.
+// pi-namespaced metrics. pi.llm.time_to_first_token is the 1.36/1.37 dialect's
+// name for time-to-first-chunk (no registry metric existed in those releases);
+// the 1.43 dialect records the registry name instead. time_to_completion has
+// no registry equivalent in any release (time_per_output_chunk measures
+// inter-chunk gaps, not request start to final token), and tool.calls stays
+// custom until the genai repo cuts tagged releases with the execute_tool /
+// invoke_agent metric sets.
 export const METRIC_LLM_TTFT = "pi.llm.time_to_first_token";
 export const METRIC_LLM_TIME_TO_COMPLETION = "pi.llm.time_to_completion";
 export const METRIC_TOOL_CALLS = "pi.tool.calls";

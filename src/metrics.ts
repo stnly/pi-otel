@@ -1,14 +1,14 @@
 /**
  * Metric instrument handles, created from a MeterProvider.
  *
- * Only gen_ai.client.operation.duration and gen_ai.client.token.usage carry
- * GenAI semconv names: those are the only client-side metrics in every
- * released convention set (v1.28 through v1.37). The timing and tool-count
- * instruments measure things no released convention covers, so they live in
- * the pi.* namespace instead of claiming an alignment that does not exist.
- * Histograms are used for distributions (token counts, durations); counters
- * for monotonic totals. Token usage is a histogram (not a counter) per spec,
- * so backends can show p50/p95 token distributions.
+ * gen_ai.client.operation.duration, gen_ai.client.token.usage, and (1.43
+ * dialect) gen_ai.client.operation.time_to_first_chunk carry registry metric
+ * names; every release before 1.43 defined exactly the first two client
+ * metrics. The remaining instruments measure things no released convention
+ * covers, so they live in the pi.* namespace instead of claiming an alignment
+ * that does not exist. Histograms are used for distributions (token counts,
+ * durations); counters for monotonic totals. Token usage is a histogram (not
+ * a counter) per spec, so backends can show p50/p95 token distributions.
  *
  * Instruments are bound to the provider passed in. There is no process-wide
  * cache: each TelemetryRuntime owns its own Metrics instance so a reload
@@ -17,9 +17,11 @@
 
 import { type Counter, type Histogram, type MeterProvider } from "@opentelemetry/api";
 import { extensionVersion } from "./version.js";
+import type { SemconvDialect } from "./config.js";
 import {
   METRIC_OP_DURATION,
   METRIC_TOKEN_USAGE,
+  METRIC_GEN_AI_TIME_TO_FIRST_CHUNK,
   METRIC_TOOL_CALLS,
   METRIC_LLM_TTFT,
   METRIC_LLM_TIME_TO_COMPLETION,
@@ -60,15 +62,21 @@ export interface Metrics {
 }
 
 /** Create metric handles bound to this MeterProvider. Returns null if no provider. */
-export function createMetrics(provider: MeterProvider | null | undefined): Metrics | null {
+export function createMetrics(
+  provider: MeterProvider | null | undefined,
+  semconv: SemconvDialect = "1.43",
+): Metrics | null {
   if (!provider) return null;
   const meter = provider.getMeter(METER_NAME, METER_VERSION);
+  // The 1.43 dialect records the registry's time-to-first-chunk metric; the
+  // older dialects keep pi.llm.time_to_first_token, the name they always had.
+  const ttftName = semconv === "1.43" ? METRIC_GEN_AI_TIME_TO_FIRST_CHUNK : METRIC_LLM_TTFT;
   return {
     opDuration: meter.createHistogram(METRIC_OP_DURATION, {
       description: "Duration of GenAI client operations",
       unit: "s",
     }),
-    timeToFirstToken: meter.createHistogram(METRIC_LLM_TTFT, {
+    timeToFirstToken: meter.createHistogram(ttftName, {
       description: "Time from LLM request start to first streamed token",
       unit: "s",
     }),

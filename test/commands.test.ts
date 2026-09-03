@@ -69,6 +69,7 @@ const EXPECTED_LABELS = [
   "protocol",
   "service.name",
   "captureContent",
+  "semconv",
   "sampleRatio",
   "active trace id",
   "shutdown timeout",

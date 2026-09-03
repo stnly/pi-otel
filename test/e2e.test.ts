@@ -248,15 +248,17 @@ describe("end-to-end over real HTTP OTLP (JSON protocol)", () => {
       "turn parented under the interaction",
     );
 
-    // gen_ai attributes on the LLM span, by value. Default dialect is 1.37:
-    // the renamed provider key, and the old key absent.
+    // gen_ai attributes on the LLM span, by value. Default dialect is 1.43:
+    // the registry provider key and usage-attribute names; no pre-registry keys.
     const llmAttrs = attrsToRecord(llm.attributes);
     assert.equal(llmAttrs["gen_ai.provider.name"], "test");
-    assert.equal(llmAttrs["gen_ai.system"], undefined, "1.37 does not write the pre-rename key");
+    assert.equal(llmAttrs["gen_ai.system"], undefined, "1.43 does not write the pre-rename key");
     assert.equal(llmAttrs["gen_ai.request.model"], "test-model");
+    assert.equal(llmAttrs["gen_ai.request.stream"], true, "1.43 records gen_ai.request.stream");
     assert.equal(llmAttrs["gen_ai.usage.input_tokens"], 10);
     assert.equal(llmAttrs["gen_ai.usage.output_tokens"], 5);
-    assert.equal(llmAttrs["gen_ai.usage.cache_read_input_tokens"], 3);
+    assert.equal(llmAttrs["gen_ai.usage.cache_read.input_tokens"], 3);
+    assert.equal(llmAttrs["gen_ai.usage.cache_read_input_tokens"], undefined, "1.43 does not write the pre-registry cache key");
     assert.deepEqual(llmAttrs["gen_ai.response.finish_reasons"], ["tool_use"]);
 
     // The tool span links back to the LLM span that requested it.
@@ -289,6 +291,7 @@ describe("end-to-end over real HTTP OTLP (JSON protocol)", () => {
     assert.ok(!metricNames.some((n) => n.startsWith("gen_ai.client.") && ![
       "gen_ai.client.operation.duration",
       "gen_ai.client.token.usage",
+      "gen_ai.client.operation.time_to_first_chunk",
     ].includes(n)), "no invented gen_ai.client.* metric names");
   });
 

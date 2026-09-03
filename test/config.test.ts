@@ -642,16 +642,18 @@ describe("sampler selection", () => {
 });
 
 describe("semconv dialect", () => {
-  test("defaults to 1.37", () => {
-    assert.equal(resolveConfig("/nonexistent").semconv, "1.37");
+  test("defaults to 1.43", () => {
+    assert.equal(resolveConfig("/nonexistent").semconv, "1.43");
   });
 
-  test("PI_OTEL_SEMCONV selects 1.36; unknown values fall back to 1.37", () => {
+  test("PI_OTEL_SEMCONV selects each dialect; unknown values fall back to 1.43", () => {
     process.env.PI_OTEL_SEMCONV = "1.36";
     assert.equal(resolveConfig("/nonexistent").semconv, "1.36");
+    process.env.PI_OTEL_SEMCONV = "1.37";
+    assert.equal(resolveConfig("/nonexistent").semconv, "1.37");
     process.env.PI_OTEL_SEMCONV = "latest";
-    assert.equal(resolveConfig("/nonexistent").semconv, "1.37", "old dialect names are gone");
-    process.env.PI_OTEL_SEMCONV = "1.38";
-    assert.equal(resolveConfig("/nonexistent").semconv, "1.37", "future versions fall back until supported");
+    assert.equal(resolveConfig("/nonexistent").semconv, "1.43", "unknown names fall back to the default");
+    process.env.PI_OTEL_SEMCONV = "1.44";
+    assert.equal(resolveConfig("/nonexistent").semconv, "1.43", "future versions fall back until supported");
   });
 });

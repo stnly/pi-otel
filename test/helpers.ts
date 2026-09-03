@@ -82,7 +82,7 @@ export function harnessConfig(overrides: Partial<ResolvedConfig> = {}): Resolved
     metrics: { enabled: true },
     logs: { enabled: true },
     sampler: "parentbased_traceidratio",
-    semconv: "1.37",
+    semconv: "1.43",
     tracesExportTimeoutMs: 10000,
     metricsExportTimeoutMs: 10000,
     logsExportTimeoutMs: 10000,
@@ -106,7 +106,7 @@ export function harnessConfig(overrides: Partial<ResolvedConfig> = {}): Resolved
 }
 
 export function makeHarness(
-  opts: { captureContent?: "metadata_only" | "no_tool_content" | "full"; semconv?: "1.36" | "1.37" } = {},
+  opts: { captureContent?: "metadata_only" | "no_tool_content" | "full"; semconv?: "1.36" | "1.37" | "1.43" } = {},
 ): Harness {
   const captureContent = opts.captureContent ?? "full";
 
@@ -122,7 +122,7 @@ export function makeHarness(
   const tracker = new SpanTracker({
     tracer,
     captureContent,
-    semconv: opts.semconv ?? "1.37",
+    semconv: opts.semconv ?? "1.43",
     sessionId: () => "test-session",
     sessionFile: () => "/tmp/test.jsonl",
     cwd: "/test",

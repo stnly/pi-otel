@@ -38,6 +38,8 @@ import {
 // and not guaranteed to resolve from an extension's own node_modules.
 import {
   ATTR_GEN_AI_AGENT_NAME,
+  ATTR_GEN_AI_CACHE_CREATION_INPUT_TOKENS,
+  ATTR_GEN_AI_CACHE_READ_INPUT_TOKENS,
   ATTR_GEN_AI_CACHE_READ_TOKENS,
   ATTR_GEN_AI_CACHE_WRITE_1H_TOKENS,
   ATTR_GEN_AI_CACHE_WRITE_TOKENS,
@@ -48,11 +50,14 @@ import {
   ATTR_GEN_AI_OUTPUT_MESSAGES,
   ATTR_GEN_AI_OUTPUT_TOKENS,
   ATTR_GEN_AI_PROVIDER_NAME,
+  ATTR_GEN_AI_REASONING_OUTPUT_TOKENS,
   ATTR_GEN_AI_REASONING_TOKENS,
+  ATTR_GEN_AI_REQUEST_MODEL,
+  ATTR_GEN_AI_REQUEST_STREAM,
   ATTR_GEN_AI_RESPONSE_FINISH_REASONS,
   ATTR_GEN_AI_RESPONSE_ID,
   ATTR_GEN_AI_RESPONSE_MODEL,
-  ATTR_GEN_AI_REQUEST_MODEL,
+  ATTR_GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK,
   ATTR_GEN_AI_SYSTEM,
   ATTR_GEN_AI_SYSTEM_PROMPT_HASH,
   ATTR_GEN_AI_TOKEN_TYPE,
@@ -102,9 +107,10 @@ import type { SemconvDialect } from "./config.js";
 export interface TrackerOptions {
   tracer: Tracer;
   captureContent: ContentCapture;
-  /** GenAI convention version. Default `1.37` (gen_ai.provider.name, no
-   * message span events). `1.36` emits the pre-2025-10 set (gen_ai.system
-   * plus the message events) for backends not yet migrated. */
+  /** GenAI convention version. Default `1.43` (registry usage-attribute
+   * names, gen_ai.request.stream, no message span events). `1.37` emits the
+   * 2025-10 set, `1.36` the pre-rename set (gen_ai.system plus the message
+   * events), both for backends not yet migrated. */
   semconv?: SemconvDialect;
   /** Lazy session id so the tracker doesn't need ctx at construction. */
   sessionId: () => string | undefined;
@@ -211,7 +217,7 @@ export class SpanTracker {
 
   constructor(opts: TrackerOptions) {
     this.opts = opts;
-    this.semconv = opts.semconv ?? "1.37";
+    this.semconv = opts.semconv ?? "1.43";
     this.now = opts.now ?? (() => Date.now());
     this.orphanTtlMs = opts.orphanTtlMs ?? 30 * 60 * 1000;
     this.setTimer = opts.setTimer ?? defaultSetTimer;
@@ -437,6 +443,11 @@ export class SpanTracker {
       attrs[this.providerNameKey()] = providerSystem;
     }
     if (requestModel) attrs[ATTR_GEN_AI_REQUEST_MODEL] = requestModel;
+    // pi always consumes assistant responses as a stream; registry-defined
+    // from semantic-conventions 1.43.
+    if (this.semconv === "1.43") {
+      attrs[ATTR_GEN_AI_REQUEST_STREAM] = true;
+    }
     const span = this.opts.tracer.startSpan(
       SPAN_LLM_REQUEST,
       { kind: SpanKind.CLIENT, attributes: attrs },
@@ -466,6 +477,10 @@ export class SpanTracker {
     try {
       this.opts.metrics()?.timeToFirstToken.record(elapsedSec, base);
     } catch { /* best-effort */ }
+    // Registry attribute (1.43, seconds) alongside the metric.
+    if (this.semconv === "1.43") {
+      this.llm.span.setAttribute(ATTR_GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK, elapsedSec);
+    }
     this.llm.span.addEvent(EVENT_GEN_AI_FIRST_TOKEN, { elapsed_s: elapsedSec } as Attributes);
   }
 
@@ -639,18 +654,39 @@ export class SpanTracker {
     this.llm = null;
   }
 
+  /** The dialect's cache/reasoning usage attribute keys. input/output share
+   * names across dialects; the 1.43 dialect adopts the registry's dotted
+   * names (cache_read, cache_creation for a provider-managed write,
+   * reasoning.output_tokens). */
+  private usageKeys(): { cacheRead: string; cacheWrite: string; reasoning: string } {
+    if (this.semconv === "1.43") {
+      return {
+        cacheRead: ATTR_GEN_AI_CACHE_READ_INPUT_TOKENS,
+        cacheWrite: ATTR_GEN_AI_CACHE_CREATION_INPUT_TOKENS,
+        reasoning: ATTR_GEN_AI_REASONING_OUTPUT_TOKENS,
+      };
+    }
+    return {
+      cacheRead: ATTR_GEN_AI_CACHE_READ_TOKENS,
+      cacheWrite: ATTR_GEN_AI_CACHE_WRITE_TOKENS,
+      reasoning: ATTR_GEN_AI_REASONING_TOKENS,
+    };
+  }
+
   private applyUsageAttrs(m: MessageShapes.AssistantMessage): void {
     if (!this.llm) return;
     const u = m.usage;
     if (!u) return;
+    const keys = this.usageKeys();
     const set = (k: string, v: unknown) => {
       if (typeof v === "number" && Number.isFinite(v)) this.llm!.span.setAttribute(k, v);
     };
     set(ATTR_GEN_AI_INPUT_TOKENS, u.input);
     set(ATTR_GEN_AI_OUTPUT_TOKENS, u.output);
-    set(ATTR_GEN_AI_CACHE_READ_TOKENS, u.cacheRead);
-    set(ATTR_GEN_AI_CACHE_WRITE_TOKENS, u.cacheWrite);
-    set(ATTR_GEN_AI_REASONING_TOKENS, u.reasoning);
+    set(keys.cacheRead, u.cacheRead);
+    set(keys.cacheWrite, u.cacheWrite);
+    set(keys.reasoning, u.reasoning);
+    // Extension-specific: no registry release defines the 1-hour cache split.
     if (typeof u.cacheWrite1h === "number") {
       set(ATTR_GEN_AI_CACHE_WRITE_1H_TOKENS, u.cacheWrite1h);
     }
@@ -677,7 +713,9 @@ export class SpanTracker {
       m.opDuration.record(elapsedSec, base);
       // Input/output are always recorded when present (including zero). Cache
       // and reasoning types only when positive so every request does not emit
-      // a stack of zero-valued series.
+      // a stack of zero-valued series. The 1.43 dialect records only the
+      // registry's input/output token types on this metric; the cache and
+      // reasoning counts live in the span's gen_ai.usage.* attributes.
       const recordTokens = (value: number | undefined, tokenType: string, requirePositive = false) => {
         if (typeof value !== "number" || !Number.isFinite(value)) return;
         if (requirePositive && value <= 0) return;
@@ -685,10 +723,12 @@ export class SpanTracker {
       };
       recordTokens(this.llm.inputTokens, "input");
       recordTokens(this.llm.outputTokens, "output");
-      recordTokens(this.llm.cacheReadTokens, "cache_read", true);
-      recordTokens(this.llm.cacheWriteTokens, "cache_write", true);
-      recordTokens(this.llm.cacheWrite1hTokens, "cache_write_1h", true);
-      recordTokens(this.llm.reasoningTokens, "reasoning", true);
+      if (this.semconv !== "1.43") {
+        recordTokens(this.llm.cacheReadTokens, "cache_read", true);
+        recordTokens(this.llm.cacheWriteTokens, "cache_write", true);
+        recordTokens(this.llm.cacheWrite1hTokens, "cache_write_1h", true);
+        recordTokens(this.llm.reasoningTokens, "reasoning", true);
+      }
     } catch { /* best-effort */ }
   }
 

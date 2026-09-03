@@ -45,6 +45,7 @@ export function registerCommands(
         `protocol           ${c.protocol}`,
         `service.name       ${c.serviceName}`,
         `captureContent     ${c.captureContent}`,
+        `semconv            ${c.semconv}`,
         `sampleRatio        ${c.sampleRatio}`,
         `active trace id    ${traceId || "(none)"}`,
         `shutdown timeout   ${c.shutdownTimeoutMs}`,
