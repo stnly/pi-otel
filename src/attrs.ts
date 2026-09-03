@@ -91,6 +91,10 @@ export const ATTR_PI_TOOL_IS_ERROR = "pi.tool.is_error";
 export const ATTR_PI_PROMPT_LENGTH = "pi.user_prompt_length";
 export const ATTR_PI_USER_PROMPT = "pi.user_prompt";
 export const ATTR_PI_INTERACTION_ID = "pi.interaction.id";
+/** What opened the interaction: `user` (a user prompt) or `agent` (a run pi
+ * started without before_agent_start: an auto-retry re-run or an
+ * extension-triggered turn on an idle session). */
+export const ATTR_PI_INTERACTION_ORIGIN = "pi.interaction.origin";
 export const ATTR_PI_CANCELLED = "pi.cancelled";
 export const ATTR_PI_ORPHANED = "pi.orphaned";
 export const ATTR_PI_ERROR_COUNT = "pi.error_count";

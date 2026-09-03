@@ -31,6 +31,8 @@ import {
   ATTR_PI_CANCELLED,
   ATTR_PI_ORPHANED,
   ATTR_PI_INTERACTION_ID,
+  ATTR_PI_INTERACTION_ORIGIN,
+  ATTR_PI_PROMPT_LENGTH,
   ATTR_PI_ERROR_COUNT,
   ATTR_PI_TURN_COUNT,
   ATTR_PI_TOOL_COUNT,
@@ -1277,6 +1279,85 @@ describe("orphan sweep", () => {
     const llm = exporter.getFinishedSpans().find(s => s.name === "pi.llm_request");
     assert.ok(llm, "LLM span ended by the sweep");
     assert.equal(llm!.attributes[ATTR_PI_ORPHANED], true);
+  });
+});
+
+// --- interaction auto-open (agent_start without before_agent_start) ---------
+
+describe("ensureInteraction", () => {
+  test("opens an agent-origin interaction when none is open, and turns attach to it", async () => {
+    const hx = makeHarness();
+    hx.tracker.startSession();
+    // A run pi started without before_agent_start (retry re-run on older pi,
+    // or an extension-triggered turn on an idle session).
+    hx.tracker.ensureInteraction();
+    hx.tracker.startTurn(0);
+    hx.tracker.startLlm("m", "anthropic");
+    hx.tracker.completeLlm(asstMsg({ text: "t" }));
+    hx.tracker.endTurn();
+    hx.tracker.endInteraction({ reason: "end" });
+    hx.tracker.endSession();
+    await hx.flush();
+    const session = hx.span(SPAN_SESSION);
+    const interaction = hx.span(SPAN_INTERACTION);
+    const turn = hx.span(SPAN_TURN);
+    const llm = hx.span(SPAN_LLM_REQUEST);
+    assert.equal(interaction.attributes[ATTR_PI_INTERACTION_ORIGIN], "agent", "origin is agent, not user");
+    assert.equal(interaction.attributes[ATTR_PI_PROMPT_LENGTH], undefined, "no prompt attributes");
+    assert.equal(
+      interaction.spanContext().traceId, session.spanContext().traceId,
+      "auto-opened interaction stays on the session trace",
+    );
+    assert.equal(turn.spanContext().traceId, session.spanContext().traceId, "turn on session trace");
+    assert.equal(llm.spanContext().traceId, session.spanContext().traceId, "llm on session trace");
+    assert.equal(hx.metrics.counters["prompts"]?.length ?? 0, 0, "agent-origin interactions do not count as user prompts");
+  });
+
+  test("no-op when an interaction is already open", async () => {
+    const hx = makeHarness();
+    hx.tracker.startSession();
+    hx.tracker.startInteraction("user prompt");
+    hx.tracker.ensureInteraction(); // agent_start after before_agent_start
+    hx.tracker.startTurn(0);
+    hx.tracker.startLlm("m", "anthropic");
+    hx.tracker.completeLlm(asstMsg({ text: "t" }));
+    hx.tracker.endTurn();
+    hx.tracker.endInteraction({ reason: "end" });
+    hx.tracker.endSession();
+    await hx.flush();
+    const interactions = hx.spanExporter.getFinishedSpans().filter((s) => s.name === SPAN_INTERACTION);
+    assert.equal(interactions.length, 1, "agent_start does not supersede the user interaction");
+    assert.equal(interactions[0]!.attributes[ATTR_PI_INTERACTION_ORIGIN], "user");
+    assert.equal(interactions[0]!.attributes[ATTR_PI_PROMPT_LENGTH], "user prompt".length);
+    assert.equal(hx.metrics.counters["prompts"]?.length, 1, "the user prompt still counts once");
+  });
+
+  test("a retried run (end, reopen, end) produces one interaction per pi run on the fallback path", async () => {
+    // Old-pi fallback: agent_end closes the interaction, the retry's
+    // agent_start reopens one (agent origin). No turns are dropped.
+    const hx = makeHarness();
+    hx.tracker.startSession();
+    hx.tracker.startInteraction("p");
+    hx.tracker.startTurn(0);
+    hx.tracker.startLlm("m", "anthropic");
+    hx.tracker.completeLlm(asstMsg({ stopReason: "error", errorMessage: "overloaded" }));
+    hx.tracker.endTurn();
+    hx.tracker.endInteraction({ reason: "end" }); // agent_end (no agent_settled)
+    hx.tracker.ensureInteraction(); // agent_start re-run
+    hx.tracker.startTurn(0);
+    hx.tracker.startLlm("m", "anthropic");
+    hx.tracker.completeLlm(asstMsg({ text: "recovered" }));
+    hx.tracker.endTurn();
+    hx.tracker.endInteraction({ reason: "end" });
+    hx.tracker.endSession();
+    await hx.flush();
+    const spans = hx.spanExporter.getFinishedSpans();
+    const session = hx.span(SPAN_SESSION);
+    assert.equal(spans.filter((s) => s.name === SPAN_TURN).length, 2, "both turns recorded");
+    for (const s of spans) {
+      if (s.name === SPAN_SESSION) continue;
+      assert.equal(s.spanContext().traceId, session.spanContext().traceId, `${s.name} on session trace`);
+    }
   });
 });
 

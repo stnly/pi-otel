@@ -68,6 +68,7 @@ import {
   ATTR_PI_CWD,
   ATTR_PI_ERROR_COUNT,
   ATTR_PI_INTERACTION_ID,
+  ATTR_PI_INTERACTION_ORIGIN,
   ATTR_PI_ORPHANED,
   ATTR_PI_PROMPT_LENGTH,
   ATTR_PI_SESSION_FILE,
@@ -141,7 +142,7 @@ function categorizeHttpError(status: number): string {
   if (status === 429) return "rate_limit";
   if (status === 401 || status === 403) return "auth_error";
   if (status >= 500) return "server_error";
-  if (status >= 400) return "client_error";
+  // Only reached for unexpected 4xx statuses this extension does not name.
   return "client_error";
 }
 
@@ -329,12 +330,29 @@ export class SpanTracker {
   /** A user prompt begins an interaction. */
   startInteraction(prompt: string | undefined): void {
     if (this.interaction) this.endInteraction({ reason: "superseded" });
+    this.openInteraction(prompt, "user");
+  }
+
+  /**
+   * Open an interaction only when none is open. Covers runs pi starts
+   * without `before_agent_start`: the retry after an `agent_end` that closed
+   * the interaction (pi < 0.80.5), and extension-triggered turns on an idle
+   * session. Not a user prompt: no prompt metric, no prompt attributes; the
+   * span is tagged `pi.interaction.origin=agent`.
+   */
+  ensureInteraction(): void {
+    if (this.interaction) return;
+    this.openInteraction(undefined, "agent");
+  }
+
+  private openInteraction(prompt: string | undefined, origin: "user" | "agent"): void {
     this.interactionCount++;
     this.interactionTurnCount = 0;
     this.interactionToolCount = 0;
     this.pendingInput = [];
     const attrs = this.commonAttrs();
     attrs[ATTR_PI_INTERACTION_ID] = this.interactionCount;
+    attrs[ATTR_PI_INTERACTION_ORIGIN] = origin;
     if (typeof prompt === "string") {
       attrs[ATTR_PI_PROMPT_LENGTH] = prompt.length;
       if (this.shouldCapturePrompt()) {
@@ -347,7 +365,9 @@ export class SpanTracker {
     const span = this.opts.tracer.startSpan(SPAN_INTERACTION, { attributes: attrs }, parent);
     this.interaction = { span, ctx: trace.setSpan(parent, span) };
     this.interactionStartMs = this.now();
-    try { this.opts.metrics()?.promptCount.add(1, this.commonAttrs()); } catch { /* noop */ }
+    if (origin === "user") {
+      try { this.opts.metrics()?.promptCount.add(1, this.commonAttrs()); } catch { /* noop */ }
+    }
   }
 
   endInteraction(opts: { reason: string; cancelled?: boolean; error?: unknown } = { reason: "end" }): void {

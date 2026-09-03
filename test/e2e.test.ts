@@ -219,6 +219,7 @@ describe("end-to-end over real HTTP OTLP (JSON protocol)", () => {
       toolResults: [],
     });
     await emit("agent_end", { messages: [] });
+    await emit("agent_settled", {});
     await emit("session_shutdown", { reason: "quit" });
 
     assert.ok(received.traces.length > 0, "traces exported");
@@ -291,6 +292,72 @@ describe("end-to-end over real HTTP OTLP (JSON protocol)", () => {
     ].includes(n)), "no invented gen_ai.client.* metric names");
   });
 
+  test("an auto-retried run stays inside one interaction on the session trace", async () => {
+    // pi's retry flow: agent.prompt() ends in a retryable error (agent_end,
+    // no agent_settled yet), then agent.continue() re-emits agent_start with
+    // no before_agent_start. The retry's turns and LLM spans must stay in the
+    // same interaction and on the session's trace id, and both turns count.
+    resetReceived();
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = ENDPOINT;
+    const { pi, handlers, ctx } = fakePi();
+    const mod = await import("../src/index.ts");
+    mod.default(pi);
+    const emit = async (event: string, payload: any) => {
+      const h = handlers.get(event);
+      if (h) await h({ type: event, ...payload }, ctx);
+    };
+
+    await emit("session_start", { reason: "startup" });
+    await emit("before_agent_start", { prompt: "retry me", systemPrompt: "" });
+    await emit("agent_start", {});
+    // Turn 0: provider error, retryable.
+    await emit("turn_start", { turnIndex: 0, timestamp: Date.now() });
+    await emit("before_provider_request", { payload: {} });
+    await emit("after_provider_response", { status: 503, headers: {} });
+    await emit("turn_end", {
+      turnIndex: 0,
+      message: { role: "assistant", content: [], model: "test-model", usage: { input: 5, output: 0, cacheRead: 0, cacheWrite: 0 }, stopReason: "error", errorMessage: "overloaded" },
+      toolResults: [],
+    });
+    // Run 1 ends in a retryable error. No agent_settled yet: pi is about to
+    // retry, and the interaction must survive this agent_end.
+    await emit("agent_end", { messages: [] });
+    // Retry: agent_start again, NO before_agent_start.
+    await emit("agent_start", {});
+    await emit("turn_start", { turnIndex: 0, timestamp: Date.now() });
+    await emit("before_provider_request", { payload: {} });
+    await emit("after_provider_response", { status: 200, headers: {} });
+    await emit("turn_end", {
+      turnIndex: 0,
+      message: { role: "assistant", content: [{ type: "text", text: "recovered" }], model: "test-model", usage: { input: 6, output: 2, cacheRead: 0, cacheWrite: 0 }, stopReason: "stop" },
+      toolResults: [],
+    });
+    await emit("agent_end", { messages: [] });
+    await emit("agent_settled", {});
+    await emit("session_shutdown", { reason: "quit" });
+
+    const spans = allSpans();
+    const session = spans.find((s) => s.name === "pi.session")!;
+    assert.ok(session, "session span");
+    const interactions = spans.filter((s) => s.name === "pi.interaction");
+    assert.equal(interactions.length, 1, "retry does not open a second interaction");
+    assert.equal(
+      spans.filter((s) => s.name === "pi.turn").length, 2,
+      "both runs' turn spans recorded",
+    );
+    assert.equal(
+      spans.filter((s) => s.name === "pi.llm_request").length, 2,
+      "both runs' llm spans recorded",
+    );
+    for (const s of spans) {
+      if (s.name === "pi.session") continue;
+      assert.equal(s.traceId, session.traceId, `${s.name} stays on the session trace`);
+    }
+    const interactionAttrs = attrsToRecord(interactions[0]!.attributes);
+    assert.equal(interactionAttrs["pi.interaction.origin"], "user");
+    assert.equal(interactionAttrs["pi.turn_count"], 2, "interaction counts both runs' turns");
+  });
+
   test("semconv=1.36 restores the pre-rename attribute set and events", async () => {
     resetReceived();
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = ENDPOINT;
@@ -316,6 +383,7 @@ describe("end-to-end over real HTTP OTLP (JSON protocol)", () => {
         toolResults: [],
       });
       await emit("agent_end", { messages: [] });
+      await emit("agent_settled", {});
       await emit("session_shutdown", { reason: "quit" });
 
       const llm = allSpans().find((s) => s.name === "pi.llm_request")!;
@@ -387,6 +455,7 @@ describe("end-to-end over real HTTP OTLP (JSON protocol)", () => {
       },
     });
     await emit("agent_end", { messages: [] });
+    await emit("agent_settled", {});
     await emit("session_shutdown", { reason: "new" });
     const afterA = received.traces.length;
     assert.ok(afterA > 0, "session A exported traces on non-quit shutdown");
@@ -414,6 +483,7 @@ describe("end-to-end over real HTTP OTLP (JSON protocol)", () => {
       },
     });
     await emit("agent_end", { messages: [] });
+    await emit("agent_settled", {});
     await emit("session_shutdown", { reason: "quit" });
     assert.ok(received.traces.length > afterA, "session B exported additional traces");
   });
@@ -433,6 +503,7 @@ describe("end-to-end over real HTTP OTLP (JSON protocol)", () => {
       await emit("session_start", { reason: "startup" });
       await emit("before_agent_start", { prompt: "x", systemPrompt: "" });
       await emit("agent_end", { messages: [] });
+      await emit("agent_settled", {});
       await emit("session_shutdown", { reason: "quit" });
       assert.equal(received.traces.length, 0, "no traces when disabled");
       assert.equal(received.logs.length, 0, "no logs when disabled");
@@ -472,12 +543,25 @@ describe("end-to-end over real HTTP OTLP (JSON protocol)", () => {
       },
     });
     await emit("agent_end", { messages: [] });
+    await emit("agent_settled", {});
+    // Overflow-recovery compaction: pi reports the aborted turn will be retried.
+    await emit("session_compact", {
+      reason: "overflow",
+      fromExtension: false,
+      willRetry: true,
+      compactionEntry: { tokensBefore: 12345 },
+    });
     await emit("session_shutdown", { reason: "quit" });
 
     assert.ok(received.logs.length > 0, "logs exported");
     const eventNames = allLogRecords().map((r) => attrsToRecord(r.attributes)["event.name"]);
     assert.ok(eventNames.includes("pi.session.start"), "pi.session.start");
     assert.ok(eventNames.includes("pi.session.end"), "pi.session.end emitted on shutdown");
+    const compact = allLogRecords().find((r) => attrsToRecord(r.attributes)["event.name"] === "pi.session.compact");
+    assert.ok(compact, "pi.session.compact log");
+    const compactAttrs = attrsToRecord(compact!.attributes);
+    assert.equal(compactAttrs["pi.compaction.will_retry"], true, "willRetry recorded");
+    assert.equal(compactAttrs["pi.compaction.reason"], "overflow");
     assert.ok(eventNames.includes("pi.llm_request.error"), "pi.llm_request.error on HTTP >=400");
     assert.ok(eventNames.includes("pi.tool.error"), "pi.tool.error on failed tool");
   });

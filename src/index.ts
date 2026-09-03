@@ -32,7 +32,7 @@ import { SeverityNumber } from "@opentelemetry/api-logs";
 import { resolveConfig } from "./config.js";
 import { registerCommands } from "./commands.js";
 import { emitLog } from "./logging.js";
-import { type TelemetryRuntime, startRuntime } from "./sdk.js";
+import { type TelemetryRuntime, piAtLeast, startRuntime } from "./sdk.js";
 import { clampAttr } from "./attrs.js";
 import { extractMessageText, SpanTracker, type SessionReason } from "./tracker.js";
 
@@ -81,6 +81,10 @@ export default function (pi: ExtensionAPI): void {
   let runtime: TelemetryRuntime | null = null;
   let tracker: SpanTracker | null = null;
   let cfg = resolveConfig(process.cwd());
+  /** pi >= 0.80.5 emits agent_settled once per prompt run, after every
+   * automatic retry and queued continuation. Older pi ends the interaction
+   * at agent_end instead (which fragments retried runs; see agent_start). */
+  const supportsAgentSettled = piAtLeast("0.80.5");
   /** Abort listener registered for the active turn; removed on turn_end. */
   let abortCleanup: (() => void) | null = null;
   /** True once we have logged an HTTP-level LLM error for the open request. */
@@ -234,6 +238,12 @@ export default function (pi: ExtensionAPI): void {
     if (typeof event.compactionEntry?.tokensBefore === "number") {
       attrs["pi.compaction.tokens_before"] = event.compactionEntry.tokensBefore;
     }
+    // Overflow recovery retries the aborted turn after compacting; threshold
+    // and manual compactions do not. Guarded so older pi without the field
+    // still emits the rest of the record.
+    if (typeof event.willRetry === "boolean") {
+      attrs["pi.compaction.will_retry"] = event.willRetry;
+    }
     runtime && cfg.selfLogs && emitLog(
       runtime.logger,
       "pi.session.compact",
@@ -340,8 +350,30 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("agent_end", async (_event, _ctx) => {
-    tracker?.endInteraction({ reason: "end" });
+    // pi < 0.80.5 has no agent_settled; there the interaction ends here.
+    // Newer pi may auto-retry, compact-and-retry, or continue with queued
+    // follow-ups after agent_end without refiring before_agent_start, so the
+    // interaction stays open until agent_settled (registered below).
+    if (!supportsAgentSettled) {
+      tracker?.endInteraction({ reason: "end" });
+    }
   });
+
+  pi.on("agent_start", async (_event, ctx) => {
+    lastCtx = ctx;
+    // A run pi started without before_agent_start: the auto-retry after an
+    // agent_end that closed the interaction, or an extension-triggered turn
+    // on an idle session. No-op when an interaction is already open.
+    tracker?.ensureInteraction();
+  });
+
+  if (supportsAgentSettled) {
+    // Fires exactly once per prompt run, after every retry, auto-compaction,
+    // and queued follow-up finished (pi >= 0.80.5).
+    pi.on("agent_settled", async () => {
+      tracker?.endInteraction({ reason: "end" });
+    });
+  }
 
   // ----------------------------------------------------------- tool events
   pi.on("tool_execution_start", async (event, _ctx) => {
