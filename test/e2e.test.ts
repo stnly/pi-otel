@@ -201,6 +201,7 @@ describe("end-to-end over real HTTP OTLP (JSON protocol)", () => {
     await emit("turn_start", { turnIndex: 0, timestamp: Date.now() });
     await emit("before_provider_request", { payload: {} });
     await emit("message_start", { message: { role: "user", content: "read the file" } });
+    await emit("message_start", { message: { role: "custom", customType: "notes", content: [{ type: "text", text: "extension context" }] } });
     await emit("after_provider_response", { status: 200, headers: {} });
     await emit("tool_execution_start", { toolCallId: "t1", toolName: "read", args: { path: "/x" } });
     await emit("tool_execution_end", { toolCallId: "t1", toolName: "read", result: { out: "contents" }, isError: false });
@@ -260,6 +261,9 @@ describe("end-to-end over real HTTP OTLP (JSON protocol)", () => {
     assert.equal(llmAttrs["gen_ai.usage.cache_read.input_tokens"], 3);
     assert.equal(llmAttrs["gen_ai.usage.cache_read_input_tokens"], undefined, "1.43 does not write the pre-registry cache key");
     assert.deepEqual(llmAttrs["gen_ai.response.finish_reasons"], ["tool_use"]);
+    // Extension-injected custom messages are part of the captured input.
+    const inputMessages = JSON.parse(String(llmAttrs["gen_ai.input.messages"])) as Array<{ parts: Array<{ content: string }> }>;
+    assert.ok(inputMessages.some((m) => m.parts.some((p) => p.content === "extension context")), "custom message captured as input");
 
     // The tool span links back to the LLM span that requested it.
     const tool = byName("pi.tool.read")[0]!;

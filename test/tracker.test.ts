@@ -1369,6 +1369,29 @@ describe("ensureInteraction", () => {
     assert.equal(hx.metrics.counters["prompts"]?.length ?? 0, 0, "agent-origin interactions do not count as user prompts");
   });
 
+  test("captures extension-injected custom messages as LLM input", async () => {
+    // pi emits message_start for custom messages (before_agent_start results
+    // and sendCustomMessage deliveries) alongside the user message; index.ts
+    // feeds both through noteUserInput. Verify the buffered input lands in
+    // gen_ai.input.messages.
+    const hx = makeHarness();
+    hx.tracker.startSession();
+    hx.tracker.startInteraction("user prompt");
+    hx.tracker.startTurn(0);
+    hx.tracker.startLlm("m", "anthropic");
+    hx.tracker.noteUserInput("user prompt");
+    hx.tracker.noteUserInput("extension-injected context"); // custom message
+    hx.tracker.completeLlm(asstMsg({ text: "t" }));
+    hx.tracker.endTurn();
+    hx.tracker.endInteraction();
+    hx.tracker.endSession();
+    await hx.flush();
+    const a = hx.span(SPAN_LLM_REQUEST).attributes;
+    const parsed = JSON.parse(String(a[ATTR_GEN_AI_INPUT_MESSAGES])) as Array<{ role: string; parts: Array<{ content: string }> }>;
+    assert.equal(parsed.length, 2, "both user and custom inputs captured");
+    assert.deepEqual(parsed.map((m) => m.parts[0]?.content), ["user prompt", "extension-injected context"]);
+  });
+
   test("no-op when an interaction is already open", async () => {
     const hx = makeHarness();
     hx.tracker.startSession();

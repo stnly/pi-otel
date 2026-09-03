@@ -21,6 +21,7 @@ import {
   effectiveExporterTokens,
   grpcMetadataFromHeaders,
   piAtLeast,
+  processOwner,
   piVersion,
   type ExportHealth,
 } from "../src/sdk.ts";
@@ -130,6 +131,47 @@ describe("startRuntime", () => {
       assert.ok(rt.tracer, "no-op tracer available");
       assert.equal(rt.metrics, null, "no metrics instruments");
       assert.equal(rt.logger, null, "no logger");
+    } finally {
+      await rt.shutdown();
+    }
+  });
+
+  test("json mode strips console exporters through startRuntime wiring", async () => {
+    // hasUI is false in json mode; the mode flag must still suppress console
+    // output so span JSON cannot interleave with the json-mode event stream.
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (...args: unknown[]) => { logs.push(args.join(" ")); };
+    let rt;
+    try {
+      rt = await startRuntime(cfg({ tracesExporters: ["console"] }), { hasUI: false, mode: "json" });
+      const span = rt.tracer.startSpan("json-mode-leak-check");
+      span.end();
+      await rt.flush();
+      assert.ok(!logs.some((l) => l.includes("json-mode-leak-check")), "no console span output in json mode");
+      assert.ok(rt.traceProvider, "provider built from the otlp fallback");
+    } finally {
+      console.log = orig;
+      await rt?.shutdown();
+    }
+  });
+
+  test("grpc protocol with headers constructs exporters without errors", async () => {
+    // Exercises the headers -> grpc Metadata translation through the real
+    // construction path (the grpc exporters reject plain `headers` config by
+    // type and ignored it by behavior before the fix).
+    const rt = await startRuntime(cfg({
+      protocol: "grpc",
+      endpoint: "127.0.0.1:9",
+      tracesEndpoint: "127.0.0.1:9",
+      metricsEndpoint: "127.0.0.1:9",
+      logsEndpoint: "127.0.0.1:9",
+      headers: { "x-api-key": "test" },
+    }));
+    try {
+      assert.equal(rt.health.tracesError, undefined, "traces exporter built");
+      assert.equal(rt.health.metricsError, undefined, "metrics exporter built");
+      assert.equal(rt.health.logsError, undefined, "logs exporter built");
     } finally {
       await rt.shutdown();
     }
@@ -439,6 +481,20 @@ describe("per-signal exporters", () => {
     } finally {
       await rt.shutdown();
     }
+  });
+});
+
+describe("processOwner", () => {
+  test("returns the OS username when userInfo succeeds", () => {
+    assert.equal(processOwner(() => ({ username: "stan" })), "stan");
+  });
+
+  test("returns unknown when userInfo throws (unregistered UID in a container)", () => {
+    assert.equal(processOwner(() => { throw new Error("ENOENT: no such user"); }), "unknown");
+  });
+
+  test("returns unknown when username is missing", () => {
+    assert.equal(processOwner(() => ({})), "unknown");
   });
 });
 

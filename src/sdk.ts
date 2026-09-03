@@ -305,10 +305,13 @@ function trackHealth<T>(
 }
 
 /** True when the OS reports a username; "unknown" when userInfo() throws
- * (containers running an arbitrary UID with no passwd entry). */
-function processOwner(): string {
+ * (containers running an arbitrary UID with no passwd entry). Injectable for
+ * tests. */
+export function processOwner(
+  userInfoFn: () => { username?: string } = userInfo,
+): string {
   try {
-    return userInfo().username ?? "unknown";
+    return userInfoFn().username ?? "unknown";
   } catch {
     return "unknown";
   }

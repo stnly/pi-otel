@@ -21,6 +21,7 @@ All notable changes to this project are documented in this file. The format foll
 - Tool arguments that reference the same object more than once no longer serialize as `[circular]`. The cycle guard marked every visited object, so shared-but-acyclic references (common in structured tool args) collapsed; only objects on a true reference cycle are cut now.
 - LLM failures that never produce an HTTP response (connection refused, DNS, TLS) now carry a categorized `error.type`, including a new `network_error` category, instead of shipping `exception.message` with no `error.type` for tail samplers and dashboards to key on. When an HTTP status was observed, its category still wins.
 - A non-numeric `sampleRatio` in settings JSON resolves to 1 instead of propagating `NaN` into the sampler, and the `pi-otel:log` channel clamps oversized `eventName` values like every other string attribute.
+- `gen_ai.input.messages` now includes context other extensions inject. Custom messages (from `before_agent_start` results and `sendCustomMessage` deliveries) flow through `message_start` like user input, but were dropped, so the captured input went incomplete exactly when other extensions added context.
 
 ### Added
 

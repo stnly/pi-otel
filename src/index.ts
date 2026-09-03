@@ -343,6 +343,11 @@ export default function (pi: ExtensionAPI): void {
     if (!msg) return;
     if (msg.role === "user") {
       tracker?.noteUserInput(extractMessageText(msg));
+    } else if (msg.role === "custom") {
+      // Extension-injected context (before_agent_start result messages and
+      // sendCustomMessage deliveries) is part of the next LLM call's input;
+      // without this branch it never reached gen_ai.input.messages.
+      tracker?.noteUserInput(extractMessageText(msg));
     } else if (msg.role === "toolResult") {
       const tr = msg as { toolCallId: string; toolName: string };
       tracker?.noteToolResultInput(tr.toolCallId, tr.toolName, extractMessageText(msg));
