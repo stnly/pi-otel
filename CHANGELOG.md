@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-09-03
+
+### Breaking
+
+- The default GenAI dialect is now `1.43`, the attribute set of semantic-conventions v1.43.0 (the last registry sync of the GenAI conventions before they federated to the semantic-conventions-genai repository). On the LLM span, cache and reasoning usage moves to the registry names `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`, and `gen_ai.usage.reasoning.output_tokens`; `gen_ai.client.token.usage` records only the registry's `input`/`output` token types (cache and reasoning counts live in the span attributes); `gen_ai.request.stream` and `gen_ai.response.time_to_first_chunk` are recorded; and time-to-first-token ships as the registry metric `gen_ai.client.operation.time_to_first_chunk` instead of `pi.llm.time_to_first_token`. `gen_ai.usage.cache_write_1h_input_tokens` and `gen_ai.usage.cost_usd` stay as documented extension-specific attributes (no registry release defines either). Pin `PI_OTEL_SEMCONV=1.37` (or `1.36`) to keep the previous names; each dialect still emits exactly its own set.
+- Node 20 support dropped: `engines.node` is now `>=22`, and CI runs on 22 and 24. Node 20 reached end of life in April 2026.
+- OpenTelemetry dependencies moved to `@opentelemetry/sdk-*` 2.11.0 / experimental 0.222.0 / `api` 1.9.1 / `semantic-conventions` 1.43.0.
+
+### Fixed
+
+- Auto-retried runs no longer fragment the trace tree. pi re-runs the agent loop after `agent_end` when a provider error is retryable or overflow recovery compacts, without refiring `before_agent_start`; the interaction previously closed at `agent_end`, so retried turns were dropped and retry LLM spans exported as root spans on a new trace id. The interaction now closes on `agent_settled` (pi 0.80.5+), and any run pi starts without a user prompt (a retry re-run on older pi, or an extension-triggered turn on an idle session) opens an interaction tagged `pi.interaction.origin=agent` that does not count as a user prompt. The end-to-end suite replays the retry flow and asserts the single-interaction property.
+- `service.version` now reports the running pi's real version. The previous resolution used `import.meta.resolve`, which jiti rewrites to an undefined global inside loaded extensions, so it always fell back to `unknown`.
+
+### Added
+
+- `pi.compaction.will_retry` on the compaction log record and metric attributes: overflow-recovery compactions (which retry the aborted turn) are now distinguishable from manual and threshold ones.
+- `pi.interaction.origin` (`user` | `agent`) on every interaction span.
+- A metrics test layer covering dialect-dependent instrument naming, and tracker tests for `ensureInteraction` and the 1.43 attribute set.
+
+### Changed
+
+- `BatchLogRecordProcessor` and `SimpleLogRecordProcessor` are constructed with the single options-object signature required by sdk-logs 0.220+.
+- Signal-handler lifecycle tests assert per-signal listener deltas instead of a two-signal sum, so listeners owned by the OTel SDK or the host process cannot shift the baseline.
+- The collector example configs pin image versions (otel/opentelemetry-collector-contrib 0.160.0, jaegertracing/all-in-one 1.76.0) instead of `latest`.
+
 ## [0.2.0] - 2026-08-18
 
 ### Breaking

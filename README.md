@@ -22,20 +22,23 @@ The LLM span is a `CLIENT` span carrying the GenAI semantic conventions. Backend
 
 Tool spans sit as siblings of the LLM span under the turn. Tools run after the model returns, so parenting them under the LLM span would misrepresent causality. Each tool span carries a span link back to the LLM span that triggered it, so backends that render links recover the causality without distorting timing. Several other agent exporters parent tools under the model call.
 
+When pi auto-retries a failed provider call, auto-compacts, or continues with queued follow-up messages, it re-runs the agent loop without a new user prompt. The interaction span stays open across those re-runs and closes on `agent_settled` (pi 0.80.5+; older pi closes at `agent_end`), so every retry lands in the same interaction and on the session's trace. A run pi starts without a user prompt at all (an extension-triggered turn on an idle session) opens an interaction tagged `pi.interaction.origin=agent` instead of counting itself as a user prompt.
+
 **Metrics** split by whether a released convention actually defines the name:
 
-`gen_ai.client.operation.duration` and `gen_ai.client.token.usage` are the only client-side metrics in every released GenAI convention set (verified against semantic-conventions v1.28 through v1.37), so they carry the semconv names:
+`gen_ai.client.operation.duration`, `gen_ai.client.token.usage`, and (in the default 1.43 dialect) `gen_ai.client.operation.time_to_first_chunk` are registry metric names (verified against semantic-conventions releases through v1.43.0):
 
 - `gen_ai.client.operation.duration` (histogram, seconds)
-- `gen_ai.client.token.usage` (histogram, by `gen_ai.token.type`: input, output, cache_read, cache_write, cache_write_1h, reasoning)
+- `gen_ai.client.token.usage` (histogram, by `gen_ai.token.type`; in the 1.43 dialect the registry's `input`/`output` values only — cache and reasoning counts live in the span's `gen_ai.usage.*` attributes — while the 1.36/1.37 dialects keep their historical `cache_read`, `cache_write`, `cache_write_1h`, and `reasoning` series)
+- `gen_ai.client.operation.time_to_first_chunk` (histogram, seconds; 1.43 dialect only)
 
-The timing and tool-count instruments measure things no released convention covers, so they live under `pi.*` instead of claiming an alignment that does not exist:
+The remaining instruments measure things no released convention covers, so they live under `pi.*` instead of claiming an alignment that does not exist:
 
-- `pi.llm.time_to_first_token` (histogram, seconds; gap between request start and the first streamed assistant token)
-- `pi.llm.time_to_completion` (histogram, seconds; gap between request start and the last streamed assistant token, sourced from the `message_end` event)
+- `pi.llm.time_to_first_token` (histogram, seconds; gap between request start and the first streamed assistant token; the name the 1.36/1.37 dialects use — those releases define no time-to-first-chunk metric)
+- `pi.llm.time_to_completion` (histogram, seconds; gap between request start and the last streamed assistant token, sourced from the `message_end` event; no registry metric measures this — `time_per_output_chunk` measures inter-chunk gaps)
 - `pi.tool.calls` (counter)
 
-Plus the rest of the `pi.*` set: `pi.session.duration`, `pi.prompt.count`, `pi.turn.count`, `pi.provider.retries`, `pi.turn.cancellations`, `pi.compaction.count`. When the `semantic-conventions-genai` repository cuts tagged releases, a dated `semconv` dialect will adopt its names (`gen_ai.client.operation.time_to_first_chunk`, `gen_ai.execute_tool.duration`, the `gen_ai.invoke_agent.*` set) in one move.
+Plus the rest of the `pi.*` set: `pi.session.duration`, `pi.prompt.count`, `pi.turn.count`, `pi.provider.retries`, `pi.turn.cancellations`, `pi.compaction.count`. The GenAI semantic conventions now develop in the `semantic-conventions-genai` repository (Development status, no tagged releases yet); when it cuts tags, a dated `semconv` dialect will adopt the `gen_ai.execute_tool.duration` and `gen_ai.invoke_agent.*` sets in one move.
 
 Token usage uses a histogram. The semconv is explicit about this. Histograms let the backend show the p50 and p95 token distribution per request, which a counter cannot.
 
@@ -47,13 +50,15 @@ Token usage uses a histogram. The semconv is explicit about this. Histograms let
 
 **Speaks GenAI semantic conventions natively.** LLM spans carry the full `gen_ai.*` attribute set: token usage by type, cost, request and response model, response id, finish reasons, tool call id, name, arguments, and result, plus `gen_ai.input.messages` and `gen_ai.output.messages` JSON for AI panels. `gen_ai.system` carries the real provider (`anthropic`, `openai`, `zai`, etc.) so backends group by vendor correctly. `gen_ai.agent.name` is `pi`, the agent harness. Backends that read GenAI semconv render your agent traces as model calls with no extra setup on their side.
 
-**Captures Anthropic's 1-hour cache split.** Anthropic reports cache writes two ways: 5-minute retention and 1-hour retention, at different prices. Most agent exporters fold both into `cache_write` and lose the split, which makes cost analysis wrong. You get both `gen_ai.usage.cache_write_input_tokens` and `gen_ai.usage.cache_write_1h_input_tokens`, so your cost dashboards stay accurate.
+**Captures Anthropic's 1-hour cache split.** Anthropic reports cache writes two ways: 5-minute retention and 1-hour retention, at different prices. Most agent exporters fold both into `cache_write` and lose the split, which makes cost analysis wrong. The 1.43 dialect emits the registry names `gen_ai.usage.cache_read.input_tokens` and `gen_ai.usage.cache_creation.input_tokens` (a provider-managed cache write), plus the extension-specific `gen_ai.usage.cache_write_1h_input_tokens` for the 1-hour bucket — no registry release defines that split — so your cost dashboards stay accurate. The 1.36/1.37 dialects keep their historical underscore names for backends keyed on them. `gen_ai.usage.cost_usd` is also extension-specific (no registry release defines a cost attribute).
 
 **Runs HTTP/protobuf by default, gRPC on demand.** HTTP/protobuf is the OTel spec default, needs no native dependencies, works with every backend on port 4318, and debugs with `curl`. Flip to gRPC with `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` when you want HTTP/2 multiplexing for high telemetry volume.
 
 **Survives `/reload` and session replacement.** Pi reloads extensions per session in the same process. A global provider set on the first session turns into a zombie after `/reload`, dropping every span. The tracker scopes every SDK object (provider, processor, reader, exporter) to a session: created at `session_start`, shut down at every `session_shutdown` (quit, new, resume, fork, reload). A fresh session gets a fresh SDK. The test suite asserts this property.
 
 **Never leaks orphan spans.** Replace a session (`/new`, `/resume`, `/fork`, compaction, tree navigation) or abort a turn with Esc and the tracker closes every open span, marked `pi.orphaned` or `pi.cancelled` so you can tell abandoned spans from normal ones in the backend.
+
+**Keeps retried runs on the session trace.** pi auto-retries retryable provider errors (rate limits, overloads) and auto-compacts on context overflow, re-running the agent loop after `agent_end` without a new user prompt. The tracker keeps the interaction open across those re-runs and closes it on `agent_settled`, so retried turns and their LLM spans stay inside the original interaction and on the session's trace id instead of forking into rootless spans. On pi older than 0.80.5 (no `agent_settled`), each re-run reopens an interaction tagged `pi.interaction.origin=agent`; nothing is dropped either way. The end-to-end test replays the retry flow and asserts the single-interaction property.
 
 **Tags session origin.** Every session span carries `pi.session.reason` with the value pi reported for the start: `startup`, `reload`, `new`, `resume`, or `fork`. Filter to forks to see branched sessions apart from primary ones.
 
@@ -79,7 +84,7 @@ Token usage uses a histogram. The semconv is explicit about this. Histograms let
 
 **Tunable head sampling.** Sampling defaults to 1.0, every span exported. Set `PI_OTEL_SAMPLE_RATIO` or `OTEL_TRACES_SAMPLER_ARG` below 1.0 to cap ingest cost on a hosted platform without losing representative traffic. `OTEL_TRACES_SAMPLER` selects the sampler: `parentbased_traceidratio` (default), `traceidratio`, `always_on`, or `always_off`.
 
-**Speaks the current GenAI conventions, versioned.** The GenAI semantic conventions renamed `gen_ai.system` to `gen_ai.provider.name` and moved away from the message span events in semantic-conventions v1.37.0 (October 2025). The default `1.37` dialect emits the renamed set: backends that track the conventions render model calls with no extra setup, and captured content ships once per span in the JSON message attributes instead of three times. Pin `semconv` to `1.36` (env `PI_OTEL_SEMCONV=1.36`) when a backend still reads the pre-rename keys; each dialect emits exactly its own attribute set, with no dual-write.
+**Speaks the current GenAI conventions, versioned.** The GenAI semantic conventions renamed `gen_ai.system` to `gen_ai.provider.name` and moved away from the message span events in semantic-conventions v1.37.0 (October 2025), and v1.43.0 (July 2026) added the registry usage-attribute names, `gen_ai.request.stream`, `gen_ai.response.time_to_first_chunk`, and the time-to-first-chunk metric. The default `1.43` dialect emits the current registry set: backends that track the conventions render model calls with no extra setup, captured content ships once per span in the JSON message attributes, and cache/reasoning usage lands under the names current backends read. Pin `semconv` to `1.37` or `1.36` (env `PI_OTEL_SEMCONV`) when a backend still reads the older keys; each dialect emits exactly its own attribute set, with no dual-write. GenAI convention development has since moved to the `semantic-conventions-genai` repository; a future dated dialect will follow its tagged releases.
 
 **Built-in pipeline diagnostics.** `/otel-status` prints the resolved config, per-signal endpoints, the active trace id, the last export error from each signal, and accepted vs exported span and log counts (an unexported hint means the batch queue is backed up or exports are failing). `/otel-flush` force-flushes pending telemetry. `/otel-test` emits one synthetic span, metric, and log record, force-flushes, and reports what actually shipped plus any export errors, so you can verify the backend receives all three signals in one step.
 
@@ -103,7 +108,7 @@ Local Jaeger for development (used here as a local, OTLP-native backend with a b
 
 ```bash
 docker run --rm -p 16686:16686 -p 4318:4318 \
-  -e COLLECTOR_OTLP_ENABLED=true jaegertracing/all-in-one:latest
+  -e COLLECTOR_OTLP_ENABLED=true jaegertracing/all-in-one:1.76.0
 
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 pi
@@ -158,7 +163,7 @@ Sources, highest precedence first:
     "serviceName": "pi",
     "resourceAttributes": { "deployment.env": "dev" },
     "captureContent": "full",
-    "semconv": "1.37",
+    "semconv": "1.43",
     "sampleRatio": 1.0,
     "metricExportInterval": 10000,
     "tracesExportInterval": 5000,
@@ -175,7 +180,7 @@ Sources, highest precedence first:
 }
 ```
 
-`protocol` accepts `grpc`, `http/protobuf`, or `http/json`. `captureContent` accepts `metadata_only`, `no_tool_content`, or `full`; unrecognized values resolve to `metadata_only`, and an unset value defaults to `full`. `semconv` names the semantic-conventions release whose GenAI attribute set is emitted: `1.37` (default) writes `gen_ai.provider.name` (the 2025-10 rename of `gen_ai.system`) and drops the legacy message events, so captured prompts and completions ship once in the `gen_ai.input.messages`/`gen_ai.output.messages` attributes; `1.36` writes the pre-rename `gen_ai.system` key and the message span events for backends that have not migrated. `sampleRatio` is a float in [0, 1]; 1.0 means no sampling. `selfLogs` controls whether the extension emits its own `pi.*` lifecycle log records. `diagLogLevel` routes the OpenTelemetry SDK's internal diagnostics to stderr (default `none`).
+`protocol` accepts `grpc`, `http/protobuf`, or `http/json`. `captureContent` accepts `metadata_only`, `no_tool_content`, or `full`; unrecognized values resolve to `metadata_only`, and an unset value defaults to `full`. `semconv` names the semantic-conventions release whose GenAI attribute set is emitted: `1.43` (default) writes the registry set — `gen_ai.provider.name`, the registry usage-attribute names (`gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`, `gen_ai.usage.reasoning.output_tokens`), `gen_ai.request.stream`, `gen_ai.response.time_to_first_chunk`, and the `gen_ai.client.operation.time_to_first_chunk` metric — with `gen_ai.usage.cache_write_1h_input_tokens` and `gen_ai.usage.cost_usd` as documented extension-specific extras; `1.37` writes the 2025-10 rename set with the historical underscore usage names; `1.36` writes the pre-rename `gen_ai.system` key and the message span events for backends that have not migrated. Each dialect emits exactly its own set, with no dual-write. `sampleRatio` is a float in [0, 1]; 1.0 means no sampling. `selfLogs` controls whether the extension emits its own `pi.*` lifecycle log records. `diagLogLevel` routes the OpenTelemetry SDK's internal diagnostics to stderr (default `none`).
 
 ### Environment variables
 
@@ -185,7 +190,7 @@ Standard OTel, honored verbatim:
 
 Extension-specific:
 
-`PI_OTEL_ENABLED`, `PI_OTEL_DISABLED`, `PI_OTEL_CAPTURE_CONTENT`, `PI_OTEL_SAMPLE_RATIO`, `PI_OTEL_SEMCONV` (accepts `1.36` or `1.37`), `PI_OTEL_TRACES`, `PI_OTEL_METRICS`, `PI_OTEL_LOGS`, `PI_OTEL_SELF_LOGS`, `PI_OTEL_DIAG_LOG_LEVEL`, `PI_OTEL_SHUTDOWN_TIMEOUT_MS`. Per-signal exporter env vars `OTEL_TRACES_EXPORTER`, `OTEL_METRICS_EXPORTER`, and `OTEL_LOGS_EXPORTER` accept `otlp`, `console`, and `none` (comma-separated).
+`PI_OTEL_ENABLED`, `PI_OTEL_DISABLED`, `PI_OTEL_CAPTURE_CONTENT`, `PI_OTEL_SAMPLE_RATIO`, `PI_OTEL_SEMCONV` (accepts `1.36`, `1.37`, or `1.43`), `PI_OTEL_TRACES`, `PI_OTEL_METRICS`, `PI_OTEL_LOGS`, `PI_OTEL_SELF_LOGS`, `PI_OTEL_DIAG_LOG_LEVEL`, `PI_OTEL_SHUTDOWN_TIMEOUT_MS`. Per-signal exporter env vars `OTEL_TRACES_EXPORTER`, `OTEL_METRICS_EXPORTER`, and `OTEL_LOGS_EXPORTER` accept `otlp`, `console`, and `none` (comma-separated).
 
 Per-signal exporter tokens and the `DELTA` metric default are described above. `tracesExportInterval` and `logsExportInterval` set each signal's batch processor `scheduledDelayMillis`. `metricExportInterval` sets the metric reader's export interval.
 
@@ -230,7 +235,7 @@ Anything you put in `OTEL_RESOURCE_ATTRIBUTES` overrides or extends these.
 npm test
 ```
 
-Tests span six layers: config resolution, attribute helpers, the span tracker, the SDK lifecycle, the `/otel-status` command, and an end-to-end run over a loopback OTLP/HTTP sink. The end-to-end test replays a full session through a fake `ExtensionAPI` and asserts that traces, metrics, and logs all arrive over HTTP with the documented span names. `npm run typecheck` covers `src/` and `test/`; `npm run coverage` prints a per-file coverage report. CI runs both on Node 20, 22, and 24.
+Tests span seven layers: config resolution, attribute helpers, the span tracker, metric instrument naming, the SDK lifecycle, the `/otel-status` command, and an end-to-end run over a loopback OTLP/HTTP sink. The end-to-end test replays a full session — including a provider-error auto-retry re-run — through a fake `ExtensionAPI` and asserts that traces, metrics, and logs all arrive over HTTP with the documented span names and that retried runs stay inside one interaction. `npm run typecheck` covers `src/` and `test/`; `npm run coverage` prints a per-file coverage report. CI runs both on Node 22 and 24. Requires Node 22+.
 
 ## License
 
