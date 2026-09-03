@@ -16,18 +16,25 @@ export function registerCommands(
   getRuntime: () => TelemetryRuntime | null,
   getTracker: () => TraceIdSource | null = () => null,
 ): void {
-  // console.log in headless, ctx.ui.notify in the TUI. Keeps /otel-* usable
-  // both ways without each handler repeating the guard.
+  // console.log in print mode, ctx.ui.notify when a dialog-capable UI
+  // exists (TUI and rpc). In json mode stdout is the JSON-lines event stream,
+  // so the fallback writes to stderr instead of interleaving a non-event
+  // line a strict consumer would reject.
   const notify = (ctx: ExtensionContext, msg: string, level: "info" | "warning"): void => {
-    ctx.hasUI ? ctx.ui.notify(msg, level) : console.log(`${level.toUpperCase()}: ${msg}`);
+    if (ctx.hasUI) {
+      ctx.ui.notify(msg, level);
+    } else if (ctx.mode === "json") {
+      console.error(`${level.toUpperCase()}: ${msg}`);
+    } else {
+      console.log(`${level.toUpperCase()}: ${msg}`);
+    }
   };
   pi.registerCommand("otel-status", {
     description: "Show pi-otel configuration and export health",
     handler: async (_args, ctx: ExtensionContext) => {
       const rt = getRuntime();
       if (!rt) {
-        const msg = "pi-otel: disabled (no telemetry runtime)";
-        ctx.hasUI ? ctx.ui.notify(msg, "warning") : console.log(msg);
+        notify(ctx, "pi-otel: disabled (no telemetry runtime)", "warning");
         return;
       }
       const c = rt.config;

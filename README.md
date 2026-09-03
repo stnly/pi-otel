@@ -202,6 +202,8 @@ Per-signal exporter tokens and the `DELTA` metric default are described above. `
 | `/otel-flush` | Force-flush pending telemetry to the backend. |
 | `/otel-test` | Emit one synthetic span, metric, and log record, flush, then report what actually shipped (export deltas) and surface any export errors. Use it to verify the pipeline end to end. |
 
+Command output goes through `ctx.ui.notify` in the TUI and rpc modes, prints to stdout in print mode, and writes to stderr in json mode so it never interleaves with the JSON-lines event stream on stdout.
+
 ## Cross-extension log channel
 
 Other pi extensions can route structured log records through this exporter:

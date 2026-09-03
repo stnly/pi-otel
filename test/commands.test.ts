@@ -12,9 +12,12 @@ function captureRegisterCommands(
   getTracker: () => { activeTraceId(): string | undefined } | null = () => null,
 ): {
   commands: Record<string, { handler: CommandHandler }>;
-  runStatus: () => Promise<string>;
+  runStatus: (mode?: string) => Promise<string>;
+  /** Both streams captured by the last runStatus call. */
+  lastStreams: { out: string; err: string };
 } {
   const commands: Record<string, { handler: CommandHandler }> = {};
+  const lastStreams = { out: "", err: "" };
   const fakePi = {
     registerCommand: (name: string, def: { handler: CommandHandler }) => {
       commands[name] = def;
@@ -22,22 +25,30 @@ function captureRegisterCommands(
   } as unknown as ExtensionAPI;
   registerCommands(fakePi, getRuntime, getTracker);
 
-  async function runStatus(): Promise<string> {
-    const fakeCtx = { hasUI: false } as unknown as ExtensionContext;
+  async function runStatus(mode?: string): Promise<string> {
+    const fakeCtx = { hasUI: false, mode } as unknown as ExtensionContext;
     const orig = console.log;
+    const origErr = console.error;
     let captured = "";
+    let capturedErr = "";
     try {
       console.log = (s: string) => {
         captured = s;
       };
+      console.error = (s: string) => {
+        capturedErr = s;
+      };
       await commands["otel-status"]!.handler([], fakeCtx);
     } finally {
       console.log = orig;
+      console.error = origErr;
     }
-    return captured;
+    lastStreams.out = captured;
+    lastStreams.err = capturedErr;
+    return mode === "json" ? capturedErr : captured;
   }
 
-  return { commands, runStatus };
+  return { commands, runStatus, lastStreams };
 }
 
 function minimalRuntime(
@@ -95,6 +106,20 @@ function assertLabelColumnAligned(text: string, valueStart = 19): void {
 }
 
 describe("otel-status command", () => {
+  test("json mode writes to stderr, never stdout", async () => {
+    // pi's json mode streams session events as JSON lines on stdout; a
+    // console.log fallback there interleaves a non-event line. The output
+    // must land on stderr instead, with print mode unchanged on stdout.
+    const { runStatus, lastStreams } = captureRegisterCommands(() => minimalRuntime({}));
+    const stderrText = await runStatus("json");
+    assert.ok(stderrText.includes("enabled"), "status text present on stderr");
+    assert.ok(stderrText.startsWith("INFO:"), "level prefix present");
+    assert.equal(lastStreams.out, "", "stdout untouched in json mode");
+    const stdoutText = await runStatus();
+    assert.ok(stdoutText.includes("enabled"), "print mode still prints to stdout");
+    assert.equal(lastStreams.err, "", "stderr untouched in print mode");
+  });
+
   test("renders all expected lines with correct labels and alignment", async () => {
     const endpoint = "https://otel.example:4318";
     const serviceName = "pi-status-test";
@@ -189,7 +214,7 @@ describe("otel-status command", () => {
   test("no-runtime path returns the disabled message", async () => {
     const { runStatus } = captureRegisterCommands(() => null);
     const text = await runStatus();
-    assert.equal(text, "pi-otel: disabled (no telemetry runtime)");
+    assert.equal(text, "WARNING: pi-otel: disabled (no telemetry runtime)");
   });
 });
 
