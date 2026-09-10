@@ -19,6 +19,7 @@ import {
   installSignalShutdown,
   buildSampler,
   effectiveExporterTokens,
+  boundedExportTimeout,
   grpcMetadataFromHeaders,
   piAtLeast,
   processOwner,
@@ -510,6 +511,21 @@ describe("grpcMetadataFromHeaders", () => {
   test("empty headers yield empty metadata", async () => {
     const metadata = await grpcMetadataFromHeaders({});
     assert.equal(metadata.get("x-api-key").length, 0);
+  });
+});
+
+describe("boundedExportTimeout", () => {
+  test("caps the exporter request timeout at the shutdown budget", () => {
+    assert.equal(boundedExportTimeout(60_000, 2_000), 2_000);
+    assert.equal(boundedExportTimeout(10_000, 2_000), 2_000);
+  });
+
+  test("keeps a shorter timeout unchanged", () => {
+    assert.equal(boundedExportTimeout(500, 2_000), 500);
+  });
+
+  test("floors at 100ms so a zero shutdown budget cannot produce an invalid timeout", () => {
+    assert.equal(boundedExportTimeout(10_000, 0), 100);
   });
 });
 

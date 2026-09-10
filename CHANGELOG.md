@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-09-10
+
+### Fixed
+
+- A collector that accepts connections but never responds can no longer keep the pi process alive past the shutdown deadline. `shutdownProviders` already gave up at `PI_OTEL_SHUTDOWN_TIMEOUT_MS`, but the in-flight export request held its socket referenced until the exporter's own (possibly much longer) request timeout fired, and the exporter's retry logic chained up to five further attempts inside that window — so the process outlived pi's output by up to a minute with a long `OTEL_EXPORTER_OTLP_TIMEOUT`. Exporter request timeouts are now bounded by the shutdown budget (`boundedExportTimeout`, floor 100ms), which makes the export deadline and the shutdown deadline expire together, and at the deadline the extension destroys in-flight HTTP export sockets outright. Slow collectors keep working by raising `PI_OTEL_SHUTDOWN_TIMEOUT_MS`, which raises the export bound with it. A child-process regression test asserts the process itself exits against a hanging receiver, not merely that the shutdown promise resolves.
+
 ## [0.3.0] - 2026-09-03
 
 ### Breaking

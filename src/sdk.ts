@@ -12,6 +12,8 @@
 import { readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { hostname, userInfo, version as nodeVersion } from "node:os";
+import type { Agent as HttpAgent } from "node:http";
+import type { Agent as HttpsAgent } from "node:https";
 // VERSION is the running pi's own version string: pi's extension loader
 // aliases this specifier to the host package, so it reports the pi that is
 // executing this extension, not a bundled copy (which import.meta.resolve
@@ -131,6 +133,53 @@ export interface ExporterOpts {
   /** Request timeout. The OTLP exporter constructor throws on <= 0 or NaN;
    * config resolution guarantees a positive finite value. */
   timeoutMillis: number;
+  /** Agent options or factory for the HTTP exporters. Passing the reaper's
+   * factory lets shutdown abort in-flight exports; ignored by the gRPC
+   * exporters, which own their channels. */
+  httpAgentOptions?: HttpAgentOptions;
+}
+
+export type HttpAgentOptions =
+  | import("node:http").AgentOptions
+  | import("node:https").AgentOptions
+  | ((protocol: string) => HttpAgent | HttpsAgent | Promise<HttpAgent> | Promise<HttpsAgent>);
+
+/**
+ * Owns the HTTP agents this runtime's exporters create, so shutdown can
+ * abort in-flight exports.
+ *
+ * A pending export keeps its socket referenced, and a referenced socket
+ * keeps Node's event loop alive: a collector that accepts the connection and
+ * never responds holds the process open until the exporter's own
+ * (potentially much longer) timeout fires. agent.destroy() does not help —
+ * it only reaps idle keep-alive sockets. Destroying the ACTIVE sockets
+ * settles the pending exports with a network error so the loop can drain.
+ */
+export class ExportSocketReaper {
+  private readonly agents = new Set<HttpAgent | HttpsAgent>();
+
+  /** HttpAgentFactory-compatible. Dynamic import per the exporter docs so
+   * @opentelemetry/instrumentation-http can instrument the module first;
+   * keepAlive matches the exporter default. */
+  readonly agentFactory = async (protocol: string): Promise<HttpAgent | HttpsAgent> => {
+    const mod = protocol === "http:" ? await import("node:http") : await import("node:https");
+    const agent = new mod.Agent({ keepAlive: true });
+    this.agents.add(agent);
+    return agent;
+  };
+
+  /** Destroy every in-flight socket across the agents this factory created.
+   * No-op when nothing is in flight. */
+  destroyActiveSockets(): void {
+    for (const agent of this.agents) {
+      const sockets = (agent as { sockets?: Record<string, Array<{ destroy(): void }>> }).sockets ?? {};
+      for (const list of Object.values(sockets)) {
+        for (const socket of list) {
+          try { socket.destroy(); } catch { /* already gone */ }
+        }
+      }
+    }
+  }
 }
 
 /** Build grpc Metadata from plain headers. The grpc exporter config omits
@@ -302,6 +351,22 @@ function trackHealth<T>(
     });
   }) as ExportFn;
   return exporter;
+}
+
+/** Bound an exporter request timeout by the shutdown budget.
+ *
+ * An export that cannot finish within the shutdown budget can never be
+ * flushed at exit, and its pending request keeps the process's event loop
+ * open until its own — possibly much longer — timeout fires; the exporter's
+ * retry logic would then keep the chain alive for up to five further
+ * attempts. Bounding the request timeout at the budget makes the export
+ * deadline and the shutdown deadline expire together, so pending exports
+ * settle and the process exits on schedule. The floor keeps the exporter
+ * constructor's positive-timeout requirement satisfied when the budget is 0
+ * (skip-wait). Users with slow collectors raise PI_OTEL_SHUTDOWN_TIMEOUT_MS,
+ * which raises this bound with it. */
+export function boundedExportTimeout(timeoutMs: number, shutdownTimeoutMs: number): number {
+  return Math.max(100, Math.min(timeoutMs, shutdownTimeoutMs));
 }
 
 /** True when the OS reports a username; "unknown" when userInfo() throws
@@ -487,6 +552,8 @@ export async function startRuntime(
   const resource = await buildResource(cfg);
 
   // --- Traces ---
+  const socketReaper = new ExportSocketReaper();
+  const agentOpts = { httpAgentOptions: socketReaper.agentFactory };
   let traceProvider: BasicTracerProvider | undefined;
   if (cfg.enabled && cfg.traces.enabled) {
     const traceTokens = effectiveExporterTokens(cfg.tracesExporters, hasUI, mode);
@@ -501,7 +568,7 @@ export async function startRuntime(
           let exporter: SpanExporter;
           try {
             exporter = trackHealth(
-              await newTraceExporter(cfg.protocol, { url: cfg.tracesEndpoint, headers: cfg.headers, timeoutMillis: cfg.tracesExportTimeoutMs }),
+              await newTraceExporter(cfg.protocol, { url: cfg.tracesEndpoint, headers: cfg.headers, timeoutMillis: boundedExportTimeout(cfg.tracesExportTimeoutMs, cfg.shutdownTimeoutMs), ...agentOpts }),
               (ok, count, err) => {
                 if (ok) { health.spansExported += count; health.tracesError = undefined; }
                 else { health.tracesError = err; }
@@ -548,7 +615,7 @@ export async function startRuntime(
           let exporter: PushMetricExporter;
           try {
             exporter = trackHealth(
-              await newMetricExporter(cfg.protocol, { url: cfg.metricsEndpoint, headers: cfg.headers, timeoutMillis: cfg.metricsExportTimeoutMs }),
+              await newMetricExporter(cfg.protocol, { url: cfg.metricsEndpoint, headers: cfg.headers, timeoutMillis: boundedExportTimeout(cfg.metricsExportTimeoutMs, cfg.shutdownTimeoutMs), ...agentOpts }),
               (ok, _count, err) => {
                 if (ok) { health.metricBatchesExported++; health.metricsError = undefined; }
                 else { health.metricsError = err; }
@@ -588,7 +655,7 @@ export async function startRuntime(
           let exporter: LogRecordExporter;
           try {
             exporter = trackHealth(
-              await newLogExporter(cfg.protocol, { url: cfg.logsEndpoint, headers: cfg.headers, timeoutMillis: cfg.logsExportTimeoutMs }),
+              await newLogExporter(cfg.protocol, { url: cfg.logsEndpoint, headers: cfg.headers, timeoutMillis: boundedExportTimeout(cfg.logsExportTimeoutMs, cfg.shutdownTimeoutMs), ...agentOpts }),
               (ok, count, err) => {
                 if (ok) { health.logRecordsExported += count; health.logsError = undefined; }
                 else { health.logsError = err; }
@@ -646,7 +713,9 @@ export async function startRuntime(
     if (shutdownStarted) return;
     shutdownStarted = true;
     removeProcessHooks();
-    await shutdownProviders(traceProvider, meterProvider, loggerProvider, cfg.shutdownTimeoutMs, health);
+    // When the deadline wins, destroy in-flight export sockets so pending
+    // requests settle and the event loop can drain (see ExportSocketReaper).
+    await shutdownProviders(traceProvider, meterProvider, loggerProvider, cfg.shutdownTimeoutMs, health, () => socketReaper.destroyActiveSockets());
   };
 
   // Registered after `shutdown` exists; the listeners only fire long after
@@ -676,11 +745,13 @@ interface ShutdownableProvider {
 
 /**
  * Run forceFlush then shutdown for each provider in parallel, racing the whole
- * thing against `timeoutMs`. On timeout, record the failure on `health` and
- * swallow it: a broken collector must never block pi's exit. Each provider
- * chains flush->shutdown so a slow logger flush does not delay the meter or
- * tracer shutdown. Extracted from `startRuntime` so the timeout behavior is
- * unit-testable without spinning up a real collector socket.
+ * thing against `timeoutMs`. On timeout, record the failure on `health`, call
+ * `onTimeout` (used to abort in-flight export sockets so the process can
+ * actually exit), and swallow the error: a broken collector must never block
+ * pi's exit. Each provider chains flush->shutdown so a slow logger flush does
+ * not delay the meter or tracer shutdown. Extracted from `startRuntime` so
+ * the timeout behavior is unit-testable without spinning up a real collector
+ * socket.
  */
 export async function shutdownProviders(
   traceProvider: ShutdownableProvider | undefined,
@@ -688,6 +759,7 @@ export async function shutdownProviders(
   loggerProvider: ShutdownableProvider | undefined,
   timeoutMs: number,
   health: ExportHealth,
+  onTimeout?: () => void,
 ): Promise<void> {
   const chains: Promise<void>[] = [];
   if (traceProvider) chains.push(traceProvider.forceFlush().then(() => traceProvider.shutdown()));
@@ -705,7 +777,10 @@ export async function shutdownProviders(
     ]);
   } catch (err) {
     health.lastShutdownError = err instanceof Error ? err.message : String(err);
-    // Swallow: a broken collector must never break pi's exit.
+    // Abort in-flight export sockets so their pending requests settle; the
+    // provider chains still complete (or already have) and the event loop can
+    // drain. Swallow errors from the hook itself: teardown must not throw.
+    try { onTimeout?.(); } catch { /* best-effort */ }
   }
 }
 
