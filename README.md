@@ -100,6 +100,32 @@ Then `/reload` in pi, or restart.
 
 This package ships TypeScript source under `src/` and is loaded by pi via jiti. It is not a precompiled library API for general Node imports.
 
+## Pi Durable
+
+Pi Durable does not load `src/index.ts` and does not emit `session_start`. A harness imports the second entry and installs the extension in its own registry. The peer is optional and pinned to `@earendil-works/pi-durable@1.3.0`, so a coding-agent install does not pull it in.
+
+```ts
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+import { BasicTracerProvider, BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
+import { createDurableTraces } from "pi-otel/pi-durable";
+
+const provider = new BasicTracerProvider({
+  spanProcessors: [new BatchSpanProcessor(new OTLPTraceExporter())],
+});
+const traces = createDurableTraces({
+  tracer: provider.getTracer("pi-otel"),
+  captureContent: "metadata_only", // "no_tool_content" or "full"
+  semconv: "1.43",
+});
+registry.install(traces.extension);
+```
+
+`OTEL_EXPORTER_OTLP_ENDPOINT` selects the collector. The extension does not read `PI_OTEL_*` or `.pi/settings.json`. You pass the tracer and the capture mode in.
+
+Generation hooks emit `pi.llm_request` (`gen_ai.operation.name=chat`, provider, model, finish reasons, usage). Tool hooks emit `pi.tool.<name>` as a sibling and link it to the model span that requested the call. The trace id is the first 32 hex chars of `sha256("pi-otel:" + conversationId)`. After a restart, `harness.resume()` continues the conversation and the next model call lands on that same trace. Spans still open when the process died are gone. Call `traces.endConversation(conversationId)` when you finish with a conversation, then `provider.forceFlush()` before the process exits.
+
+`metadata_only` ships no prompt, completion, or tool payload. Metrics and logs from the coding-agent entry are not part of this path.
+
 ## Quick start
 
 Point the extension at an OTLP/HTTP backend and run pi.
