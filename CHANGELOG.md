@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-10-19
+
+### Added
+
+- Pi Durable tracing, imported as `pi-otel/pi-durable`. A harness installs `createDurableTraces({ tracer }).extension` in its own registry. Generation hooks emit `pi.llm_request` and tool hooks emit `pi.tool.<name>`, linked to the model span that requested the call. The trace id is the first 32 hex chars of `sha256("pi-otel:" + conversationId)`, so `harness.resume()` continues the same trace. Content defaults to `metadata_only`. The coding-agent entry is unchanged, and `@earendil-works/pi-durable@1.3.0` is an optional peer.
+
 ## [0.3.1] - 2026-09-10
 
 ### Fixed
