@@ -1,0 +1,27 @@
+name: lint action pins
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: require commit shas
+        run: |
+          # A tag ref (actions/checkout@v4) is movable. Only a 40-char
+          # commit sha pins the code that runs. Local actions
+          # (./.github/actions/...) are versioned by this repo.
+          bad="$(grep -REn --include='*.yml' --include='*.yaml' \
+            '^[[:space:]]*(- )?uses:' .github \
+            | grep -vE 'uses: \./' \
+            | grep -vE 'uses: [^@[:space:]]+@[0-9a-f]{40}( #.*)?$' || true)"
+          if [ -n "$bad" ]; then
+            echo "actions must be pinned to a full commit sha:" >&2
+            echo "$bad" >&2
+            exit 1
+          fi
+          echo "all actions pinned"
